@@ -1,7 +1,7 @@
 /** The best score kept on the device. Shared by the start screen and the game over screen. */
-export const BEST_SCORE_KEY = 'skyFalcon.best';
+export const BEST_SCORE_KEY = "skyFalcon.best";
 
-type ScoreStorage = Pick<Storage, 'getItem' | 'setItem'>;
+type ScoreStorage = Pick<Storage, "getItem" | "setItem">;
 
 /** A stored value as a score: a whole number, 0 or more; anything else is 0. */
 export function parseBest(raw: string | null | undefined): number {

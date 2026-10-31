@@ -1,4 +1,4 @@
-import './style.css';
-import { createGame } from './game/config';
+import "./style.css";
+import { createGame } from "./game/config";
 
-createGame('game');
+createGame("game");

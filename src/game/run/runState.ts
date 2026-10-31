@@ -6,15 +6,19 @@ import {
   STEP_SECONDS,
   crash,
   stepFalcon,
-} from '../falcon/falconPhysics';
-import { falconHitsField } from '../obstacles/collision';
-import { type ObstacleField, createField, stepField } from '../obstacles/obstacleField';
+} from "../falcon/falconPhysics";
+import { falconHitsField } from "../obstacles/collision";
+import {
+  type ObstacleField,
+  createField,
+  stepField,
+} from "../obstacles/obstacleField";
 
 /**
  * One run: the falcon and the obstacles, moved together in fixed steps and checked for a hit on every step.
  * Pure: no Phaser, so it can be tested on its own.
  */
-export type RunOverReason = 'ground' | 'obstacle';
+export type RunOverReason = "ground" | "obstacle";
 
 export interface RunState {
   falcon: FalconState;
@@ -39,26 +43,59 @@ export interface RunOptions {
  */
 export function parseRunOptions(search: string): RunOptions {
   const params = new URLSearchParams(search);
-  const seedText = params.get('seed');
-  const seed = seedText !== null && /^-?\d+$/.test(seedText.trim()) ? Number(seedText) : undefined;
-  return { obstacles: params.get('obstacles') !== 'off', seed, autopilot: params.get('autopilot') === '1' };
+  const seedText = params.get("seed");
+  const seed =
+    seedText !== null && /^-?\d+$/.test(seedText.trim())
+      ? Number(seedText)
+      : undefined;
+  return {
+    obstacles: params.get("obstacles") !== "off",
+    seed,
+    autopilot: params.get("autopilot") === "1",
+  };
 }
 
-export function createRun(falcon: FalconState, bounds: FalconBounds, seed: number, obstacles = true): RunState {
-  return { falcon, field: obstacles ? createField(seed, bounds.groundY, falcon.y) : null, over: null, passed: 0 };
+export function createRun(
+  falcon: FalconState,
+  bounds: FalconBounds,
+  seed: number,
+  obstacles = true,
+): RunState {
+  return {
+    falcon,
+    field: obstacles ? createField(seed, bounds.groundY, falcon.y) : null,
+    over: null,
+    passed: 0,
+  };
 }
 
 /** The x the falcon's back edge sits at: an obstacle whose right edge is left of it has been passed. */
 const PASS_LINE = FALCON.x - FALCON.radius;
 
 /** One fixed step of `dt` seconds: the falcon, then the obstacles, then the hit check. */
-export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunState {
-  if (state.over || state.falcon.phase !== 'flying') return state;
+export function stepRun(
+  state: RunState,
+  dt: number,
+  bounds: FalconBounds,
+): RunState {
+  if (state.over || state.falcon.phase !== "flying") return state;
   const falcon = stepFalcon(state.falcon, dt, bounds);
-  if (!state.field) return falcon.phase === 'down' ? { ...state, falcon, over: 'ground' } : { ...state, falcon };
+  if (!state.field)
+    return falcon.phase === "down"
+      ? { ...state, falcon, over: "ground" }
+      : { ...state, falcon };
 
-  let passed = state.passed;
   const moved = stepField(state.field, dt);
+  if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, moved)) {
+    // A touch ends the run with no point for this step.
+    return {
+      falcon: crash(falcon),
+      field: moved,
+      passed: state.passed,
+      over: "obstacle",
+    };
+  }
+  let passed = state.passed;
   const field: ObstacleField = {
     ...moved,
     obstacles: moved.obstacles.map((o) => {
@@ -67,17 +104,19 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
       return { ...o, passed: true };
     }),
   };
-  if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, field)) {
-    return { falcon: crash(falcon), field, passed, over: 'obstacle' };
-  }
-  if (falcon.phase === 'down') return { falcon, field, passed, over: 'ground' };
+  if (falcon.phase === "down") return { falcon, field, passed, over: "ground" };
   return { falcon, field, passed, over: null };
 }
 
 /** Moves the run on by one frame of `elapsedMs` (capped at MAX_FRAME_MS), in fixed steps; stops at the first hit. */
-export function advanceRun(state: RunState, elapsedMs: number, bounds: FalconBounds): RunState {
-  if (state.over || state.falcon.phase !== 'flying') return state;
-  let time = state.falcon.carry + Math.min(Math.max(elapsedMs, 0), MAX_FRAME_MS) / 1000;
+export function advanceRun(
+  state: RunState,
+  elapsedMs: number,
+  bounds: FalconBounds,
+): RunState {
+  if (state.over || state.falcon.phase !== "flying") return state;
+  let time =
+    state.falcon.carry + Math.min(Math.max(elapsedMs, 0), MAX_FRAME_MS) / 1000;
   let next: RunState = { ...state, falcon: { ...state.falcon, carry: 0 } };
   // A small tolerance so that float error doesn't drop a whole step.
   while (time >= STEP_SECONDS - 1e-9) {

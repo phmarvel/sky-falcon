@@ -1,6 +1,6 @@
-import Phaser from 'phaser';
-import { COLORS } from '../constants';
-import { FALCON, type FalconState, falconTilt } from './falconPhysics';
+import Phaser from "phaser";
+import { COLORS } from "../constants";
+import { FALCON, type FalconState, falconTilt } from "./falconPhysics";
 
 /** Above the background (-100) and below the text later stories add. */
 export const FALCON_DEPTH = 10;
@@ -72,8 +72,13 @@ function drawWing(g: Phaser.GameObjects.Graphics): void {
 }
 
 /** The falcon, drawn with simple shapes, and its shadow on the sand. */
-export function createFalconView(scene: Phaser.Scene, groundY: number): FalconView {
-  const shadow = scene.add.ellipse(FALCON.x, groundY + 8, 52, 10, COLORS.shadow, 0.35).setDepth(FALCON_DEPTH - 1);
+export function createFalconView(
+  scene: Phaser.Scene,
+  groundY: number,
+): FalconView {
+  const shadow = scene.add
+    .ellipse(FALCON.x, groundY + 8, 52, 10, COLORS.shadow, 0.35)
+    .setDepth(FALCON_DEPTH - 1);
 
   const body = scene.add.graphics();
   drawBody(body);
@@ -81,7 +86,9 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
   drawWing(wing);
   wing.angle = WING_REST;
 
-  const container = scene.add.container(FALCON.x, FALCON.startY, [body, wing]).setDepth(FALCON_DEPTH);
+  const container = scene.add
+    .container(FALCON.x, FALCON.startY, [body, wing])
+    .setDepth(FALCON_DEPTH);
   /** 1 right after a flap, easing back to 0. */
   const stroke = { lift: 0 };
   let strokeTween: Phaser.Tweens.Tween | undefined;
@@ -93,7 +100,12 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
     flapWing() {
       strokeTween?.stop();
       stroke.lift = 1;
-      strokeTween = scene.tweens.add({ targets: stroke, lift: 0, duration: 260, ease: 'Quad.easeOut' });
+      strokeTween = scene.tweens.add({
+        targets: stroke,
+        lift: 0,
+        duration: 260,
+        ease: "Quad.easeOut",
+      });
     },
     fallFrom(y) {
       strokeTween?.stop();
@@ -105,7 +117,7 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
         y: floor,
         angle: 20,
         duration: 250 + Math.max(floor - y, 0) * 0.9,
-        ease: 'Quad.easeIn',
+        ease: "Quad.easeIn",
       });
     },
     update(state, timeMs) {
@@ -119,12 +131,12 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
       }
       let y = state.y;
       let lift = stroke.lift;
-      if (state.phase === 'ready') {
+      if (state.phase === "ready") {
         // Hovering: a gentle bob and a slow wing beat while waiting for the first flap.
         const wave = Math.sin((timeMs / BOB_PERIOD_MS) * Math.PI * 2);
         y += wave * BOB_PIXELS;
-        lift = Math.max(lift, (wave + 1) / 2 * 0.6);
-      } else if (state.phase === 'down') {
+        lift = Math.max(lift, ((wave + 1) / 2) * 0.6);
+      } else if (state.phase === "down") {
         lift = 0;
       }
       container.setPosition(FALCON.x, y);
@@ -133,7 +145,9 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
 
       // The shadow grows and darkens as the falcon gets closer to the ground.
       const closeness = Phaser.Math.Clamp(1 - (groundY - y) / groundY, 0, 1);
-      shadow.setScale(0.5 + 0.5 * closeness, 1).setAlpha(0.12 + 0.3 * closeness);
+      shadow
+        .setScale(0.5 + 0.5 * closeness, 1)
+        .setAlpha(0.12 + 0.3 * closeness);
     },
   };
 }

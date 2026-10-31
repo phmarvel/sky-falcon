@@ -32,12 +32,15 @@ export const COLORS = {
   buttonEdge: 0x1c4f32,
 } as const;
 
+/** Draw order of the score: above the obstacles (0) and the falcon (10). */
+export const SCORE_DEPTH = 50;
+
 /** Text styles for the screens. */
 export const UI = {
   fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',
-  title: '#fff4d6',
-  titleStroke: '#3a2414',
-  bestText: '#fff4d6',
-  buttonText: '#ffffff',
-  switchText: '#fff4d6',
+  title: "#fff4d6",
+  titleStroke: "#3a2414",
+  bestText: "#fff4d6",
+  buttonText: "#ffffff",
+  switchText: "#fff4d6",
 } as const;

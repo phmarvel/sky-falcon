@@ -1,11 +1,11 @@
-import Phaser from 'phaser';
-import { COLORS, GAME_HEIGHT, GAME_WIDTH } from './constants';
-import { getLangStore } from './i18n/langStore';
-import { applyPageLang } from './i18n/pageLang';
-import { fitOnResize } from './fitOnResize';
-import { FlightScene } from './scenes/FlightScene';
-import { StartScene } from './scenes/StartScene';
-import { pickFirstScene } from './scenes/sceneParam';
+import Phaser from "phaser";
+import { COLORS, GAME_HEIGHT, GAME_WIDTH } from "./constants";
+import { getLangStore } from "./i18n/langStore";
+import { applyPageLang } from "./i18n/pageLang";
+import { fitOnResize } from "./fitOnResize";
+import { FlightScene } from "./scenes/FlightScene";
+import { StartScene } from "./scenes/StartScene";
+import { pickFirstScene } from "./scenes/sceneParam";
 
 export { COLORS, GAME_HEIGHT, GAME_WIDTH };
 
@@ -15,7 +15,9 @@ declare global {
   }
 }
 
-export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Core.GameConfig {
+export function createGameConfig(
+  parent: string | HTMLElement,
+): Phaser.Types.Core.GameConfig {
   return {
     type: Phaser.AUTO,
     parent,
@@ -29,9 +31,11 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
     },
     render: { antialias: true },
     // Phaser starts the first scene in the list: the start screen, or the run with ?scene=flight.
-    scene: pickFirstScene(typeof location === 'undefined' ? '' : location.search) === 'Flight'
-      ? [FlightScene, StartScene]
-      : [StartScene, FlightScene],
+    scene:
+      pickFirstScene(typeof location === "undefined" ? "" : location.search) ===
+      "Flight"
+        ? [FlightScene, StartScene]
+        : [StartScene, FlightScene],
   };
 }
 

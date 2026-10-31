@@ -1,32 +1,41 @@
-import Phaser from 'phaser';
-import { COLORS, GAME_HEIGHT, GAME_WIDTH, UI } from '../constants';
-import { buildDesertLayout } from '../background/desertLayout';
-import { drawDesert } from '../background/drawDesert';
-import { createFalcon } from '../falcon/falconPhysics';
-import { createFalconView } from '../falcon/drawFalcon';
-import { getLangStore } from '../i18n/langStore';
-import { applyPageLang } from '../i18n/pageLang';
-import { type Lang, directionOf, formatNumber, otherLang, t } from '../i18n/strings';
-import { getBestScoreStore } from '../score/bestScore';
+import Phaser from "phaser";
+import { COLORS, GAME_HEIGHT, GAME_WIDTH, UI } from "../constants";
+import { buildDesertLayout } from "../background/desertLayout";
+import { drawDesert } from "../background/drawDesert";
+import { createFalcon } from "../falcon/falconPhysics";
+import { createFalconView } from "../falcon/drawFalcon";
+import { getLangStore } from "../i18n/langStore";
+import { applyPageLang } from "../i18n/pageLang";
+import {
+  type Lang,
+  directionOf,
+  formatNumber,
+  otherLang,
+  t,
+} from "../i18n/strings";
+import { getBestScoreStore } from "../score/bestScore";
 
 const BUTTON = { x: GAME_WIDTH / 2, y: 610, width: 240, height: 84 };
 const SWITCH = { width: 160, height: 72, y: 60, margin: 20 };
 
 /** The language switch sits in the top corner at the end of the reading direction's start: right for LTR, left for RTL. */
 function switchUi(lang: Lang) {
-  const x = directionOf(lang) === 'rtl' ? SWITCH.margin + SWITCH.width / 2 : GAME_WIDTH - SWITCH.margin - SWITCH.width / 2;
+  const x =
+    directionOf(lang) === "rtl"
+      ? SWITCH.margin + SWITCH.width / 2
+      : GAME_WIDTH - SWITCH.margin - SWITCH.width / 2;
   return { x, y: SWITCH.y, width: SWITCH.width, height: SWITCH.height };
 }
 
 /** The first screen: the name, the best score and Play. The falcon only hovers; nothing moves on until Play. */
 export class StartScene extends Phaser.Scene {
-  static readonly KEY = 'Start';
-  static readonly NEXT = 'Flight';
+  static readonly KEY = "Start";
+  static readonly NEXT = "Flight";
 
   private view!: ReturnType<typeof createFalconView>;
   private falconState = createFalcon();
   private started = false;
-  private lang: Lang = 'en';
+  private lang: Lang = "en";
   private best = 0;
   private texts: Phaser.GameObjects.GameObject[] = [];
   private switchHit!: Phaser.GameObjects.Zone;
@@ -54,31 +63,41 @@ export class StartScene extends Phaser.Scene {
       .setDepth(21)
       .setInteractive({ useHandCursor: true });
     hit.on(Phaser.Input.Events.POINTER_DOWN, this.play, this);
-    this.switchHit = this.add.zone(0, 0, SWITCH.width, SWITCH.height).setDepth(21).setInteractive({ useHandCursor: true });
+    this.switchHit = this.add
+      .zone(0, 0, SWITCH.width, SWITCH.height)
+      .setDepth(21)
+      .setInteractive({ useHandCursor: true });
     this.switchHit.on(Phaser.Input.Events.POINTER_DOWN, this.toggleLang, this);
     this.switchHit.setPosition(switchUi(this.lang).x, SWITCH.y);
     const keyboard = this.input.keyboard;
     if (keyboard) {
-      keyboard.addCapture('SPACE,ENTER,L');
-      keyboard.on('keydown-L', this.onLangKey, this);
-      keyboard.on('keydown-SPACE', this.onKey, this);
-      keyboard.on('keydown-ENTER', this.onKey, this);
+      keyboard.addCapture("SPACE,ENTER,L");
+      keyboard.on("keydown-L", this.onLangKey, this);
+      keyboard.on("keydown-SPACE", this.onKey, this);
+      keyboard.on("keydown-ENTER", this.onKey, this);
     }
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
-      keyboard?.off('keydown-L', this.onLangKey, this);
-      keyboard?.off('keydown-SPACE', this.onKey, this);
-      keyboard?.off('keydown-ENTER', this.onKey, this);
+      keyboard?.off("keydown-L", this.onLangKey, this);
+      keyboard?.off("keydown-SPACE", this.onKey, this);
+      keyboard?.off("keydown-ENTER", this.onKey, this);
     });
 
-    this.registry.set('runOver', false);
-    this.registry.set('screen', 'start');
-    this.registry.set('score', 0);
-    this.registry.set('bestScore', this.best);
-    this.registry.set('startUi', { ...BUTTON });
+    this.registry.set("runOver", false);
+    this.registry.set("screen", "start");
+    this.registry.set("score", 0);
+    this.registry.set("bestScore", this.best);
+    this.registry.set("startUi", { ...BUTTON });
     // The falcon waits ("ready"): the snapshot lets tests check that it does not fall.
     const { y, vy, phase, flaps, time } = this.falconState;
-    this.registry.set('falcon', { y, vy, phase, flaps, time, groundY: layout.horizonY });
-    this.registry.set('ready', true);
+    this.registry.set("falcon", {
+      y,
+      vy,
+      phase,
+      flaps,
+      time,
+      groundY: layout.horizonY,
+    });
+    this.registry.set("ready", true);
   }
 
   update(time: number): void {
@@ -92,11 +111,24 @@ export class StartScene extends Phaser.Scene {
     this.texts.forEach((o) => o.destroy());
     this.texts = [];
     applyPageLang(lang);
-    const rtl = directionOf(lang) === 'rtl';
+    const rtl = directionOf(lang) === "rtl";
     const font = UI.fontFamily;
-    const text = (x: number, y: number, value: string, size: number, color: string, stroke = true) => {
+    const text = (
+      x: number,
+      y: number,
+      value: string,
+      size: number,
+      color: string,
+      stroke = true,
+    ) => {
       const label = this.add
-        .text(x, y, value, { fontFamily: font, fontSize: `${size}px`, fontStyle: 'bold', color, rtl })
+        .text(x, y, value, {
+          fontFamily: font,
+          fontSize: `${size}px`,
+          fontStyle: "bold",
+          color,
+          rtl,
+        })
         .setOrigin(0.5)
         .setDepth(20);
       if (stroke) label.setStroke(UI.titleStroke, Math.round(size / 7));
@@ -104,10 +136,10 @@ export class StartScene extends Phaser.Scene {
       return label;
     };
 
-    const title = t(lang, 'title');
-    const best = `${t(lang, 'bestScore')}: ${formatNumber(this.best, lang)}`;
-    const play = t(lang, 'play');
-    const other = t(lang, 'switchLanguage');
+    const title = t(lang, "title");
+    const best = `${t(lang, "bestScore")}: ${formatNumber(this.best, lang)}`;
+    const play = t(lang, "play");
+    const other = t(lang, "switchLanguage");
     text(GAME_WIDTH / 2, 190, title, 72, UI.title);
     text(GAME_WIDTH / 2, 280, best, 38, UI.bestText);
 
@@ -115,24 +147,41 @@ export class StartScene extends Phaser.Scene {
     const top = BUTTON.y - BUTTON.height / 2;
     const shape = this.add.graphics().setDepth(20);
     this.texts.push(shape);
-    shape.fillStyle(COLORS.shadow, 0.55).fillRoundedRect(left, top + 6, BUTTON.width, BUTTON.height, 22);
-    shape.fillStyle(COLORS.button, 1).fillRoundedRect(left, top, BUTTON.width, BUTTON.height, 22);
-    shape.lineStyle(4, COLORS.buttonEdge, 1).strokeRoundedRect(left, top, BUTTON.width, BUTTON.height, 22);
+    shape
+      .fillStyle(COLORS.shadow, 0.55)
+      .fillRoundedRect(left, top + 6, BUTTON.width, BUTTON.height, 22);
+    shape
+      .fillStyle(COLORS.button, 1)
+      .fillRoundedRect(left, top, BUTTON.width, BUTTON.height, 22);
+    shape
+      .lineStyle(4, COLORS.buttonEdge, 1)
+      .strokeRoundedRect(left, top, BUTTON.width, BUTTON.height, 22);
     text(BUTTON.x, BUTTON.y - 2, play, 44, UI.buttonText, false);
 
     const sw = switchUi(lang);
     const sl = sw.x - sw.width / 2;
     const st = sw.y - sw.height / 2;
-    shape.fillStyle(COLORS.shadow, 0.55).fillRoundedRect(sl, st + 4, sw.width, sw.height, 18);
-    shape.fillStyle(COLORS.button, 1).fillRoundedRect(sl, st, sw.width, sw.height, 18);
-    shape.lineStyle(3, COLORS.buttonEdge, 1).strokeRoundedRect(sl, st, sw.width, sw.height, 18);
+    shape
+      .fillStyle(COLORS.shadow, 0.55)
+      .fillRoundedRect(sl, st + 4, sw.width, sw.height, 18);
+    shape
+      .fillStyle(COLORS.button, 1)
+      .fillRoundedRect(sl, st, sw.width, sw.height, 18);
+    shape
+      .lineStyle(3, COLORS.buttonEdge, 1)
+      .strokeRoundedRect(sl, st, sw.width, sw.height, 18);
     text(sw.x, sw.y - 1, other, 28, UI.switchText, false);
     this.switchHit?.setPosition(sw.x, sw.y);
 
-    this.registry.set('lang', lang);
-    this.registry.set('dir', directionOf(lang));
-    this.registry.set('langUi', sw);
-    this.registry.set('startTexts', { title, bestScore: best, play, switchLanguage: other });
+    this.registry.set("lang", lang);
+    this.registry.set("dir", directionOf(lang));
+    this.registry.set("langUi", sw);
+    this.registry.set("startTexts", {
+      title,
+      bestScore: best,
+      play,
+      switchLanguage: other,
+    });
   }
 
   private toggleLang(): void {
@@ -153,7 +202,7 @@ export class StartScene extends Phaser.Scene {
   private play(): void {
     if (this.started) return;
     this.started = true;
-    this.registry.set('ready', false);
+    this.registry.set("ready", false);
     this.scene.start(StartScene.NEXT);
   }
 }

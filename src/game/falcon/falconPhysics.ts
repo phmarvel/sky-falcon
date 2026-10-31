@@ -1,4 +1,4 @@
-import { GAME_HEIGHT, GAME_WIDTH } from '../constants';
+import { GAME_HEIGHT, GAME_WIDTH } from "../constants";
 
 /**
  * How the falcon moves. Pure: no Phaser, so it can be tested on its own.
@@ -22,7 +22,7 @@ export const STEP_SECONDS = 1 / 120;
 /** A longer frame (a slow device, a tab coming back) counts as this long, so the falcon never jumps through the ground. */
 export const MAX_FRAME_MS = 100;
 
-export type FalconPhase = 'ready' | 'flying' | 'down';
+export type FalconPhase = "ready" | "flying" | "down";
 
 export interface FalconState {
   y: number;
@@ -45,24 +45,33 @@ export interface FalconBounds {
 }
 
 export function createFalcon(y: number = FALCON.startY): FalconState {
-  return { y, vy: 0, phase: 'ready', flaps: 0, carry: 0, time: 0 };
+  return { y, vy: 0, phase: "ready", flaps: 0, carry: 0, time: 0 };
 }
 
 /** A flap: starts the run from 'ready', pushes the falcon up while flying, and does nothing once it is down. */
 export function flap(state: FalconState): FalconState {
-  if (state.phase === 'down') return state;
-  return { ...state, phase: 'flying', vy: FALCON.flapVelocity, flaps: state.flaps + 1 };
+  if (state.phase === "down") return state;
+  return {
+    ...state,
+    phase: "flying",
+    vy: FALCON.flapVelocity,
+    flaps: state.flaps + 1,
+  };
 }
 
 /** The falcon hit an obstacle: the run is over where it is (the view drops it onto the sand). */
 export function crash(state: FalconState): FalconState {
-  if (state.phase === 'down') return state;
-  return { ...state, phase: 'down', vy: 0, carry: 0 };
+  if (state.phase === "down") return state;
+  return { ...state, phase: "down", vy: 0, carry: 0 };
 }
 
 /** One step of `dt` seconds: gravity, then the ceiling and the ground. */
-export function stepFalcon(state: FalconState, dt: number, bounds: FalconBounds): FalconState {
-  if (state.phase !== 'flying') return state;
+export function stepFalcon(
+  state: FalconState,
+  dt: number,
+  bounds: FalconBounds,
+): FalconState {
+  if (state.phase !== "flying") return state;
   const vy = Math.min(state.vy + FALCON.gravity * dt, FALCON.maxFallSpeed);
   const time = state.time + dt;
   let y = state.y + vy * dt;
@@ -74,21 +83,26 @@ export function stepFalcon(state: FalconState, dt: number, bounds: FalconBounds)
   const floor = bounds.groundY - FALCON.radius;
   if (y >= floor) {
     y = floor;
-    return { ...state, y, vy: 0, phase: 'down', carry: 0, time };
+    return { ...state, y, vy: 0, phase: "down", carry: 0, time };
   }
   return { ...state, y, vy, time };
 }
 
 /** Moves the falcon on by one frame of `elapsedMs`, in fixed steps. */
-export function advanceFalcon(state: FalconState, elapsedMs: number, bounds: FalconBounds): FalconState {
-  if (state.phase !== 'flying') return state;
-  let time = state.carry + Math.min(Math.max(elapsedMs, 0), MAX_FRAME_MS) / 1000;
+export function advanceFalcon(
+  state: FalconState,
+  elapsedMs: number,
+  bounds: FalconBounds,
+): FalconState {
+  if (state.phase !== "flying") return state;
+  let time =
+    state.carry + Math.min(Math.max(elapsedMs, 0), MAX_FRAME_MS) / 1000;
   let next: FalconState = { ...state, carry: 0 };
   // A small tolerance so that float error doesn't drop a whole step.
   while (time >= STEP_SECONDS - 1e-9) {
     next = stepFalcon(next, STEP_SECONDS, bounds);
     time -= STEP_SECONDS;
-    if (next.phase !== 'flying') return next;
+    if (next.phase !== "flying") return next;
   }
   return { ...next, carry: Math.max(time, 0) };
 }
@@ -98,9 +112,12 @@ export const MAX_TILT = 70;
 
 /** The angle to draw the falcon at, in degrees: nose up when climbing, nose down when diving. */
 export function falconTilt(vy: number, phase: FalconPhase): number {
-  if (phase === 'ready') return 0;
-  if (phase === 'down') return 20;
+  if (phase === "ready") return 0;
+  if (phase === "down") return 20;
   // Climbing at flap speed gives MIN_TILT; falling at maxFallSpeed gives MAX_TILT.
-  const angle = vy < 0 ? (vy / -FALCON.flapVelocity) * -MIN_TILT : (vy / FALCON.maxFallSpeed) * MAX_TILT;
+  const angle =
+    vy < 0
+      ? (vy / -FALCON.flapVelocity) * -MIN_TILT
+      : (vy / FALCON.maxFallSpeed) * MAX_TILT;
   return Math.min(MAX_TILT, Math.max(MIN_TILT, angle));
 }

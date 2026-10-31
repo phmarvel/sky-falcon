@@ -1,5 +1,5 @@
-import { GAME_WIDTH } from '../constants';
-import { randomStep } from './random';
+import { GAME_WIDTH } from "../constants";
+import { randomStep } from "./random";
 
 /**
  * The towers and palm trees: where they are, how they move and where their gaps are.
@@ -27,7 +27,7 @@ export const OBSTACLES = {
   firstGapMargin: 60,
 } as const;
 
-export type ObstacleKind = 'tower' | 'palm';
+export type ObstacleKind = "tower" | "palm";
 
 export interface Obstacle {
   id: number;
@@ -57,7 +57,11 @@ export interface ObstacleField {
   sameKindRun: number;
 }
 
-export function createField(seed: number, groundY: number, startY: number): ObstacleField {
+export function createField(
+  seed: number,
+  groundY: number,
+  startY: number,
+): ObstacleField {
   return {
     obstacles: [],
     groundY,
@@ -72,7 +76,10 @@ export function createField(seed: number, groundY: number, startY: number): Obst
 
 /** The lowest and highest `gapTop` that keep the whole gap, and a piece above and below it, in the playing area. */
 export function gapRange(groundY: number): { min: number; max: number } {
-  return { min: OBSTACLES.minPiece, max: groundY - OBSTACLES.minPiece - OBSTACLES.gapSize };
+  return {
+    min: OBSTACLES.minPiece,
+    max: groundY - OBSTACLES.minPiece - OBSTACLES.gapSize,
+  };
 }
 
 /**
@@ -113,9 +120,9 @@ function spawn(field: ObstacleField, x: number): ObstacleField {
     return step.value;
   };
   const gapTop = nextGap(field.lastGapTop, rnd, field.groundY, field.startY);
-  let kind: ObstacleKind = rnd() < 0.5 ? 'tower' : 'palm';
+  let kind: ObstacleKind = rnd() < 0.5 ? "tower" : "palm";
   if (field.lastKind === kind && field.sameKindRun >= OBSTACLES.maxSameKind) {
-    kind = kind === 'tower' ? 'palm' : 'tower';
+    kind = kind === "tower" ? "palm" : "tower";
   }
   const obstacle: Obstacle = {
     id: field.nextId,
@@ -150,11 +157,17 @@ export function stepField(field: ObstacleField, dt: number): ObstacleField {
   const move = OBSTACLES.speed * dt;
   let next: ObstacleField = {
     ...field,
-    obstacles: field.obstacles.map((o) => ({ ...o, x: o.x - move })).filter((o) => !isOffScreen(o)),
+    obstacles: field.obstacles
+      .map((o) => ({ ...o, x: o.x - move }))
+      .filter((o) => !isOffScreen(o)),
   };
-  if (field.obstacles.length === 0 && field.lastGapTop === undefined) next = spawn(next, OBSTACLES.spawnX);
+  if (field.obstacles.length === 0 && field.lastGapTop === undefined)
+    next = spawn(next, OBSTACLES.spawnX);
   // Compare against the last obstacle ever added (it may not be culled: it is the rightmost one).
-  for (let last = next.obstacles.at(-1); last && last.x + OBSTACLES.spacing <= OBSTACLES.spawnX; ) {
+  for (
+    let last = next.obstacles.at(-1);
+    last && last.x + OBSTACLES.spacing <= OBSTACLES.spawnX;
+  ) {
     next = spawn(next, last.x + OBSTACLES.spacing);
     last = next.obstacles.at(-1);
   }

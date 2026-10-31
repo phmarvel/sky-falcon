@@ -11,7 +11,12 @@ body,
 
 body {
   /* The space around the canvas on wide screens continues the drawn desert: the same sky stops, horizon at 78%, then sand. */
-  background: linear-gradient(#3b6ea5 0%, #86c5e8 43%, #f9d9a8 78%, #e3b261 78%);
+  background: linear-gradient(
+    #3b6ea5 0%,
+    #86c5e8 43%,
+    #f9d9a8 78%,
+    #e3b261 78%
+  );
   background-color: #e3b261;
   touch-action: none;
   overscroll-behavior: none;
