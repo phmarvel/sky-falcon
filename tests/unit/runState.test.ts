@@ -24,6 +24,7 @@ function withObstacle(o: Partial<Obstacle>, y: number): RunState {
     gapTop: 250,
     gapBottom: 250 + OBSTACLES.gapSize,
     passed: false,
+    date: { y: 250 + OBSTACLES.gapSize / 2, caught: false },
     ...o,
   };
   return {
@@ -216,9 +217,27 @@ describe('speeding up', () => {
     expect(moved(11)).toBeCloseTo(moved(10));
   });
 
+  it('5 obstacles passed plus 5 dates caught reach the first speed step', () => {
+    const run = { ...withObstacle({ x: 400 }, 300), passed: 5, dates: 5 };
+    expect(scoreOf(run)).toBe(10);
+    const next = stepRun(run, STEP_SECONDS, bounds);
+    expect(400 - next.field!.obstacles[0].x).toBeCloseTo(OBSTACLES.speed * (1 + SPEED_UP.step) * STEP_SECONDS);
+    // 4 + 5 is still the starting speed.
+    const slow = stepRun({ ...run, passed: 4 }, STEP_SECONDS, bounds);
+    expect(400 - slow.field!.obstacles[0].x).toBeCloseTo(OBSTACLES.speed * STEP_SECONDS);
+  });
+
+  it('a date moves with its obstacle at the faster speed, so it stays in the gap', () => {
+    const run = { ...withObstacle({ x: 400, date: { y: 365, caught: false } }, 300), passed: 10 };
+    const o = stepRun(run, STEP_SECONDS, bounds).field!.obstacles[0];
+    expect(o.date.y).toBe(365);
+    expect(o.date.y).toBeGreaterThan(o.gapTop);
+    expect(o.date.y).toBeLessThan(o.gapBottom);
+  });
+
   it('a new run is back at the starting speed', () => {
     const fresh = createRun(createFalcon(), bounds, 1);
-    expect(fresh.passed).toBe(0);
+    expect(fresh.passed + fresh.dates).toBe(0);
     expect(scrollSpeedOf(scoreOf(fresh))).toBe(OBSTACLES.speed);
   });
 
@@ -242,5 +261,49 @@ describe('parseRunOptions', () => {
     expect(parseRunOptions('')).toEqual({ obstacles: true, seed: undefined, autopilot: false });
     expect(parseRunOptions('?seed=7&autopilot=1')).toEqual({ obstacles: true, seed: 7, autopilot: true });
     expect(parseRunOptions('?obstacles=off&seed=abc')).toEqual({ obstacles: false, seed: undefined, autopilot: false });
+  });
+});
+
+describe('dates (extra points)', () => {
+  const mid = 250 + OBSTACLES.gapSize / 2;
+
+  it('catching the date adds one point, once, and marks it caught', () => {
+    let run = withObstacle({}, mid);
+    run = flyLevel(run, mid, 1.2);
+    expect(run.over).toBeNull();
+    expect(run.dates).toBe(1);
+    expect(run.field!.obstacles[0]!.date.caught).toBe(true);
+  });
+
+  it('staying near the caught date adds no further point', () => {
+    let run = flyLevel(withObstacle({}, mid), mid, 1.2);
+    const after = run.dates;
+    run = flyLevel(run, mid, 0.1);
+    expect(run.dates).toBe(after);
+    expect(after).toBe(1);
+  });
+
+  it('a missed date costs nothing: only the obstacle point is added', () => {
+    const high = 250 + 25;
+    const run = flyLevel(withObstacle({}, high), high, 1.8);
+    expect(run.over).toBeNull();
+    expect(run.dates).toBe(0);
+    expect(run.passed).toBe(1);
+    expect(scoreOf(run)).toBe(1);
+  });
+
+  it('catching the date and passing the obstacle scores 2 in total', () => {
+    const run = flyLevel(withObstacle({}, mid), mid, 1.8);
+    expect(run.passed).toBe(1);
+    expect(run.dates).toBe(1);
+    expect(scoreOf(run)).toBe(2);
+  });
+
+  it('a step that ends the run adds no date point', () => {
+    // The date sits inside the top piece, right on the falcon: the hit wins and no point is added.
+    const x = FALCON.x - OBSTACLES.width / 2;
+    const run = stepRun(withObstacle({ x, date: { y: 240, caught: false } }, 240), STEP_SECONDS, bounds);
+    expect(run.over).toBe('obstacle');
+    expect(run.dates).toBe(0);
   });
 });

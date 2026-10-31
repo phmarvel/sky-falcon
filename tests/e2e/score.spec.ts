@@ -19,6 +19,7 @@ interface Frame {
   score: number;
   scoreText: string;
   passed: number;
+  dates: number;
   obstacles: Obstacle[];
   runOver: boolean;
   reason: string | null;
@@ -80,6 +81,7 @@ function play(page: Page, steer: 'gap' | 'high' | 'idle', until: number, maxSeco
             score: registry.get('score') as number,
             scoreText: registry.get('scoreText') as string,
             passed: registry.get('passed') as number,
+            dates: registry.get('dates') as number,
             obstacles,
             runOver: registry.get('runOver') as boolean,
             reason: registry.get('runOverReason') as string | null,
@@ -128,7 +130,7 @@ test('the score is 0 when the run starts, and shown on screen', async ({ page })
   expect(await reg(page, 'runOver')).toBe(false);
 });
 
-test('the score goes up by 1 for each obstacle fully passed, not before', async ({ page }) => {
+test('the score goes up by 1 for each obstacle fully passed (and each date caught), not before', async ({ page }) => {
   await openGame(page, 'seed=3');
   const frames = await play(page, 'gap', 3, 40);
   const last = frames.at(-1)!;
@@ -136,20 +138,23 @@ test('the score goes up by 1 for each obstacle fully passed, not before', async 
   expect(last.score).toBeGreaterThanOrEqual(3);
 
   let prev = 0;
+  let prevPassed = 0;
   const seen = new Map<number, Obstacle>();
   for (const fr of frames) {
     for (const o of fr.obstacles) seen.set(o.id, o);
-    expect(fr.score).toBe(fr.passed);
+    expect(fr.score).toBe(fr.passed + fr.dates);
     expect(fr.scoreText).toBe(String(fr.score));
-    expect(fr.score - prev).toBeLessThanOrEqual(1);
+    // A date and an obstacle point can land in the same frame.
+    expect(fr.score - prev).toBeLessThanOrEqual(2);
     expect(fr.score).toBeGreaterThanOrEqual(prev);
-    if (fr.score > prev) {
-      // Obstacles still on screen at the falcon's back edge have not been passed: at most `score` are fully behind it.
+    if (fr.passed > prevPassed) {
+      // Obstacles still on screen at the falcon's back edge have not been passed: at most `passed` are fully behind it.
       const behind = fr.obstacles.filter((o) => o.x + o.width < FALCON_X - RADIUS).length;
       const gone = [...seen.keys()].filter((id) => !fr.obstacles.some((o) => o.id === id)).length;
-      expect(behind + gone).toBeGreaterThanOrEqual(fr.score);
+      expect(behind + gone).toBeGreaterThanOrEqual(fr.passed);
     }
     prev = fr.score;
+    prevPassed = fr.passed;
   }
 });
 
@@ -172,7 +177,7 @@ test('after passing some obstacles, a crash keeps exactly the points earned', as
   const over = frames.find((f) => f.runOver)!;
   const final = frames.at(-1)!;
   expect(final.score).toBe(over.score);
-  expect(final.score).toBe(final.passed);
+  expect(final.score).toBe(final.passed + final.dates);
 });
 
 test('a ground crash adds no point', async ({ page }) => {

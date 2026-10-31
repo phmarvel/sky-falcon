@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { COLORS } from '../constants';
-import type { Obstacle, ObstacleField } from './obstacleField';
+import { DATE, type Obstacle, type ObstacleField } from './obstacleField';
 import { type Part, obstacleParts } from './obstacleShapes';
 
 /** Above the background (-100), below the falcon (10). */
@@ -14,6 +14,8 @@ export interface ObstacleView {
   sync(field: ObstacleField | null): void;
   /** How many obstacles are drawn now. */
   count(): number;
+  /** How many dates are drawn now (caught ones are gone). */
+  datesDrawn(): number;
 }
 
 function drawTowerPart(g: Phaser.GameObjects.Graphics, p: Part, groundY: number): void {
@@ -118,33 +120,71 @@ function drawPalmPart(g: Phaser.GameObjects.Graphics, p: Part, groundY: number):
   g.fillCircle(base.x, base.y, 6);
 }
 
-function drawObstacle(scene: Phaser.Scene, o: Obstacle, groundY: number): Phaser.GameObjects.Container {
+/** A date: a brown oval with a darker side, a shine and a small cap, centred on (0, 0). */
+function drawDate(g: Phaser.GameObjects.Graphics): void {
+  const rx = DATE.radius * 0.72;
+  const ry = DATE.radius;
+  g.fillStyle(COLORS.dateBody, 1);
+  g.fillEllipse(0, 0, rx * 2, ry * 2);
+  g.fillStyle(COLORS.dateShade, 1);
+  g.fillEllipse(rx * 0.35, ry * 0.15, rx * 1.1, ry * 1.6);
+  g.fillStyle(COLORS.dateShine, 1);
+  g.fillEllipse(-rx * 0.4, -ry * 0.35, rx * 0.4, ry * 0.7);
+  g.lineStyle(2, COLORS.dateOutline, 1);
+  g.strokeEllipse(0, 0, rx * 2, ry * 2);
+  g.lineBetween(0, -ry, 3, -ry - 5);
+}
+
+interface Shown {
+  container: Phaser.GameObjects.Container;
+  date: Phaser.GameObjects.Graphics | null;
+}
+
+function drawObstacle(scene: Phaser.Scene, o: Obstacle, groundY: number): Shown {
   const g = scene.add.graphics();
   for (const part of obstacleParts(o.kind, o.width, o.gapTop, o.gapBottom, groundY)) {
     if (o.kind === 'tower') drawTowerPart(g, part, groundY);
     else drawPalmPart(g, part, groundY);
   }
-  return scene.add.container(Math.round(o.x), 0, [g]).setDepth(OBSTACLE_DEPTH);
+  const date = scene.add.graphics();
+  drawDate(date);
+  date.setPosition(DATE.offsetX, o.date.y);
+  const container = scene.add.container(Math.round(o.x), 0, [g, date]).setDepth(OBSTACLE_DEPTH);
+  return { container, date: o.date.caught ? null : date };
 }
 
 /** The towers and palm trees: each drawn once, then only moved; removed once it leaves the field. */
 export function createObstacleView(scene: Phaser.Scene, groundY: number): ObstacleView {
-  const shown = new Map<number, Phaser.GameObjects.Container>();
+  const shown = new Map<number, Shown>();
   return {
     sync(field) {
       const alive = new Set<number>();
       for (const o of field?.obstacles ?? []) {
         alive.add(o.id);
         const existing = shown.get(o.id);
-        if (existing) existing.x = o.x;
-        else shown.set(o.id, drawObstacle(scene, o, groundY));
+        if (existing) {
+          existing.container.x = o.x;
+          if (o.date.caught && existing.date) {
+            existing.date.destroy();
+            existing.date = null;
+          }
+        } else {
+          const made = drawObstacle(scene, o, groundY);
+          if (o.date.caught) made.date?.destroy();
+          shown.set(o.id, made);
+        }
       }
-      for (const [id, container] of shown) {
+      for (const [id, item] of shown) {
         if (alive.has(id)) continue;
-        container.destroy();
+        item.container.destroy();
         shown.delete(id);
       }
     },
     count: () => shown.size,
+    datesDrawn() {
+      let n = 0;
+      for (const item of shown.values()) if (item.date) n++;
+      return n;
+    },
   };
 }

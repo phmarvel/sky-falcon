@@ -7,7 +7,7 @@ import {
   crash,
   stepFalcon,
 } from '../falcon/falconPhysics';
-import { falconHitsField } from '../obstacles/collision';
+import { falconHitsField, falconTouchesDate } from '../obstacles/collision';
 import { type ObstacleField, createField, stepField } from '../obstacles/obstacleField';
 import { scoreOf } from '../score/runScore';
 import { scrollSpeedOf } from '../score/speedUp';
@@ -25,6 +25,8 @@ export interface RunState {
   over: RunOverReason | null;
   /** How many obstacles the falcon has gone past. */
   passed: number;
+  /** How many dates the falcon has caught. */
+  dates: number;
 }
 
 export interface RunOptions {
@@ -47,7 +49,7 @@ export function parseRunOptions(search: string): RunOptions {
 }
 
 export function createRun(falcon: FalconState, bounds: FalconBounds, seed: number, obstacles = true): RunState {
-  return { falcon, field: obstacles ? createField(seed, bounds.groundY, falcon.y) : null, over: null, passed: 0 };
+  return { falcon, field: obstacles ? createField(seed, bounds.groundY, falcon.y) : null, over: null, passed: 0, dates: 0 };
 }
 
 /** The x the falcon's back edge sits at: an obstacle whose right edge is left of it has been passed. */
@@ -62,19 +64,25 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
   const moved = stepField(state.field, dt, scrollSpeedOf(scoreOf(state)));
   if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, moved)) {
     // A touch ends the run with no point for this step.
-    return { falcon: crash(falcon), field: moved, passed: state.passed, over: 'obstacle' };
+    return { falcon: crash(falcon), field: moved, passed: state.passed, dates: state.dates, over: 'obstacle' };
   }
   let passed = state.passed;
+  let dates = state.dates;
   const field: ObstacleField = {
     ...moved,
     obstacles: moved.obstacles.map((o) => {
+      // A date is caught once: it is marked, so staying near it adds nothing more.
+      if (falconTouchesDate(FALCON.x, falcon.y, FALCON.radius, o)) {
+        dates++;
+        o = { ...o, date: { ...o.date, caught: true } };
+      }
       if (o.passed || o.x + o.width >= PASS_LINE) return o;
       passed++;
       return { ...o, passed: true };
     }),
   };
-  if (falcon.phase === 'down') return { falcon, field, passed, over: 'ground' };
-  return { falcon, field, passed, over: null };
+  if (falcon.phase === 'down') return { falcon, field, passed, dates, over: 'ground' };
+  return { falcon, field, passed, dates, over: null };
 }
 
 /** Moves the run on by one frame of `elapsedMs` (capped at MAX_FRAME_MS), in fixed steps; stops at the first hit. */
