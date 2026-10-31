@@ -15,6 +15,8 @@ export interface FalconView {
   container: Phaser.GameObjects.Container;
   /** Plays the wing stroke of one flap. */
   flapWing(): void;
+  /** After hitting an obstacle: the falcon tumbles from where it is onto the sand. */
+  fallFrom(y: number): void;
   /** Places the falcon for this frame. */
   update(state: FalconState, timeMs: number): void;
 }
@@ -83,6 +85,8 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
   /** 1 right after a flap, easing back to 0. */
   const stroke = { lift: 0 };
   let strokeTween: Phaser.Tweens.Tween | undefined;
+  /** Set once the falcon crashed into an obstacle: the drop's y and angle, tweened. */
+  let drop: { y: number; angle: number } | undefined;
 
   return {
     container,
@@ -91,7 +95,28 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
       stroke.lift = 1;
       strokeTween = scene.tweens.add({ targets: stroke, lift: 0, duration: 260, ease: 'Quad.easeOut' });
     },
+    fallFrom(y) {
+      strokeTween?.stop();
+      stroke.lift = 0;
+      const floor = groundY - FALCON.radius;
+      drop = { y, angle: container.angle };
+      scene.tweens.add({
+        targets: drop,
+        y: floor,
+        angle: 20,
+        duration: 250 + Math.max(floor - y, 0) * 0.9,
+        ease: 'Quad.easeIn',
+      });
+    },
     update(state, timeMs) {
+      if (drop) {
+        container.setPosition(FALCON.x, drop.y);
+        container.angle = drop.angle;
+        wing.angle = WING_REST;
+        const near = Phaser.Math.Clamp(1 - (groundY - drop.y) / groundY, 0, 1);
+        shadow.setScale(0.5 + 0.5 * near, 1).setAlpha(0.12 + 0.3 * near);
+        return;
+      }
       let y = state.y;
       let lift = stroke.lift;
       if (state.phase === 'ready') {

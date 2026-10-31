@@ -54,6 +54,12 @@ export function flap(state: FalconState): FalconState {
   return { ...state, phase: 'flying', vy: FALCON.flapVelocity, flaps: state.flaps + 1 };
 }
 
+/** The falcon hit an obstacle: the run is over where it is (the view drops it onto the sand). */
+export function crash(state: FalconState): FalconState {
+  if (state.phase === 'down') return state;
+  return { ...state, phase: 'down', vy: 0, carry: 0 };
+}
+
 /** One step of `dt` seconds: gravity, then the ceiling and the ground. */
 export function stepFalcon(state: FalconState, dt: number, bounds: FalconBounds): FalconState {
   if (state.phase !== 'flying') return state;
