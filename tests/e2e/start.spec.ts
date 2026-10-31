@@ -13,7 +13,7 @@ interface Ui {
 async function openStart(page: Page, best?: string) {
   if (best !== undefined) await page.addInitScript((v) => localStorage.setItem('skyFalcon.best', v), best);
   await page.goto('./');
-  await expect(page.locator('#game canvas')).toBeVisible();
+  await expect(page.locator('#game canvas').first()).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,
   });
@@ -24,7 +24,7 @@ const reg = <T>(page: Page, key: string) => page.evaluate((k) => window.__SKY_FA
 /** The Play button's centre on the page. */
 async function playPoint(page: Page) {
   const ui = await reg<Ui>(page, 'startUi');
-  const box = (await page.locator('#game canvas').boundingBox())!;
+  const box = (await page.locator('#game canvas').first().boundingBox())!;
   return { x: box.x + (ui.x / 540) * box.width, y: box.y + (ui.y / 960) * box.height, box, ui };
 }
 
@@ -115,4 +115,88 @@ test('the start screen keeps Play on the canvas after a resize', async ({ page }
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('screen') === 'flight', undefined, {
     timeout: 60_000,
   });
+});
+
+interface Texts {
+  title: string;
+  bestScore: string;
+  play: string;
+  switchLanguage: string;
+}
+
+async function clickSwitch(page: Page) {
+  const ui = await reg<Ui>(page, 'langUi');
+  const box = (await page.locator('#game canvas').first().boundingBox())!;
+  const x = box.x + (ui.x / 540) * box.width;
+  const y = box.y + (ui.y / 960) * box.height;
+  await page.mouse.click(x, y);
+}
+
+const waitLang = (page: Page, lang: string) =>
+  page.waitForFunction((l) => window.__SKY_FALCON__?.registry.get('lang') === l, lang, { timeout: 60_000 });
+
+test('a new device opens in English, left to right', async ({ page }) => {
+  await openStart(page);
+  expect(await reg(page, 'lang')).toBe('en');
+  expect(await reg(page, 'dir')).toBe('ltr');
+  const texts = await reg<Texts>(page, 'startTexts');
+  expect(texts.play).toBe('Play');
+  expect(texts.title).toBe('Sky Falcon');
+  await expect(page.locator('html')).toHaveAttribute('lang', 'en');
+});
+
+test('switching to Arabic and back, and it is remembered after a reload', async ({ page }) => {
+  await openStart(page, '42');
+  await clickSwitch(page);
+  await waitLang(page, 'ar');
+  expect(await reg(page, 'dir')).toBe('rtl');
+  const ar = await reg<Texts>(page, 'startTexts');
+  expect(ar.play).toBe('العب');
+  expect(ar.title).toBe('صقر السماء');
+  expect(ar.bestScore).toContain('٤٢');
+  expect(ar.switchLanguage).toBe('English');
+  await expect(page.locator('html')).toHaveAttribute('dir', 'rtl');
+  expect(await reg(page, 'screen')).toBe('start');
+  expect(await page.evaluate(() => localStorage.getItem('skyFalcon.lang'))).toBe('ar');
+
+  await page.reload();
+  await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, { timeout: 60_000 });
+  expect(await reg(page, 'lang')).toBe('ar');
+
+  await clickSwitch(page);
+  await waitLang(page, 'en');
+  expect(await reg(page, 'dir')).toBe('ltr');
+  expect((await reg<Texts>(page, 'startTexts')).play).toBe('Play');
+  await expect(page.locator('html')).toHaveAttribute('dir', 'ltr');
+});
+
+test('the switch works when saving data is not allowed', async ({ page }) => {
+  await page.addInitScript(() => {
+    const fail = () => {
+      throw new Error('blocked');
+    };
+    Storage.prototype.setItem = fail;
+    Storage.prototype.getItem = fail;
+  });
+  await page.goto('./');
+  await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, { timeout: 60_000 });
+  await clickSwitch(page);
+  await waitLang(page, 'ar');
+  expect((await reg<Texts>(page, 'startTexts')).play).toBe('العب');
+});
+
+test('Play still starts the run in Arabic', async ({ page }) => {
+  await openStart(page);
+  await clickSwitch(page);
+  await waitLang(page, 'ar');
+  const { x, y } = await playPoint(page);
+  await page.mouse.click(x, y);
+  await expectRunStarted(page);
+  expect(await reg(page, 'lang')).toBe('ar');
+});
+
+test('?lang=ar opens in Arabic', async ({ page }) => {
+  await page.goto('./?lang=ar');
+  await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, { timeout: 60_000 });
+  expect(await reg(page, 'lang')).toBe('ar');
 });

@@ -30,4 +30,5 @@ export const UI = {
   titleStroke: '#3a2414',
   bestText: '#fff4d6',
   buttonText: '#ffffff',
+  switchText: '#fff4d6',
 } as const;
