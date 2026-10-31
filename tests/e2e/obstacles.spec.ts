@@ -202,7 +202,7 @@ test('touching a tower or a palm tree ends the run at once', async ({ page }, te
   // Everything stops: the obstacles freeze and the falcon ignores input.
   const obstacles = await page.evaluate(() => window.__SKY_FALCON__!.registry.get('obstacles'));
   await page.locator('#game canvas').first().click({ position: { x: 40, y: 40 } });
-  await page.keyboard.press('Space');
+  // (Not the space bar: on the game over screen it means Play again.)
   if (testInfo.project.use.hasTouch) await page.locator('#game canvas').first().tap({ position: { x: 40, y: 40 } });
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => window.__SKY_FALCON__!.registry.get('obstacles'))).toEqual(obstacles);

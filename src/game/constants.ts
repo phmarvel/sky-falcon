@@ -30,6 +30,9 @@ export const COLORS = {
   palmLeafDark: 0x2a6e35,
   button: 0x2f7d4f,
   buttonEdge: 0x1c4f32,
+  overlay: 0x1d1410,
+  panel: 0xfff4d6,
+  panelEdge: 0x3a2414,
 } as const;
 
 /** Text styles for the screens. */
@@ -40,4 +43,6 @@ export const UI = {
   bestText: '#fff4d6',
   buttonText: '#ffffff',
   switchText: '#fff4d6',
+  panelText: '#3a2414',
+  newBest: '#b5470d',
 } as const;

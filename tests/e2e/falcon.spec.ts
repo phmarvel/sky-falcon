@@ -256,7 +256,7 @@ test('touching the ground ends the run and the falcon stops responding', async (
   expect(down.y).toBe(down.groundY - RADIUS);
 
   await clickCanvas(page);
-  await page.keyboard.press('Space');
+  // (Not the space bar: on the game over screen it means Play again.)
   if (testInfo.project.use.hasTouch) await page.locator('#game canvas').tap({ position: { x: 40, y: 40 } });
   await page.waitForTimeout(300);
   expect(await falcon(page)).toEqual(down);
