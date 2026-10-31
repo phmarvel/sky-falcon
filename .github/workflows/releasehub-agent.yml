@@ -50,6 +50,7 @@ jobs:
           ref: ${{ inputs.base_branch }}
           fetch-depth: 0
           token: ${{ secrets.RELEASEHUB_GIT_TOKEN || github.token }}
+          persist-credentials: false
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -83,7 +84,7 @@ jobs:
           #!/usr/bin/env bash
           # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
           set -euo pipefail
-          RH_SCRIPT_VERSION="936f5e0ab7fe"
+          RH_SCRIPT_VERSION="45933c145367"
           API="${RH_API%/}"
           EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
           WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
@@ -92,6 +93,10 @@ jobs:
           TOOLS="$WORK/tools"
           USAGE='null'
           FAILING=''
+          # On GitHub, git asks this script's environment for the token when it fetches or pushes: the checkout doesn't keep it
+          # (persist-credentials: false), nothing secret is written into a repository's config, and the agent's tools run without it.
+          # shellcheck disable=SC2016 # expanded by git's shell when it asks, not here
+          GIT_TOKEN_HELPER='!f() { test "$1" = get || exit 0; echo username=x-access-token; echo "password=${GH_TOKEN:-}"; }; f'
           if [ -n "${GITHUB_RUN_ID:-}" ]; then
             RUN_ID="$GITHUB_RUN_ID"
             RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
@@ -149,6 +154,13 @@ jobs:
             echo "$1" >&2
             exit 1
           }
+          # Stops on something only a person can fix, named for ReleaseHub (git_token, actions_write), which shows its steps.
+          fail_need() {
+            FAILING=1
+            post "$(jq -nc --arg n "$1" --arg m "$2" --argjson u "$USAGE" '{type: "failed", message: $m, need: $n, usage: $u}')" || true
+            echo "$2" >&2
+            exit 1
+          }
 
           # The provider's usage limit (a Claude subscription's 5-hour or weekly limit) or a rate limit: ReleaseHub keeps the run
           # waiting and sends this stage again once the limit resets, so this is not a failure.
@@ -182,7 +194,12 @@ jobs:
             local out
             if ! out=$(git push -q origin "$RH_BRANCH" 2>&1); then
               FAILING=1
+              # GitHub lets no workflow's own token add or change a workflow file, whatever its permissions.
+              if grep -qi 'create or update workflow' <<<"$out"; then
+                fail_need git_token "GitHub refused to push $RH_BRANCH: the change adds or edits a file in .github/workflows, which the pipeline's own token may not do. Add the repository secret RELEASEHUB_GIT_TOKEN: a token for this repository with Contents, Pull requests and Workflows (read and write). Then start the run again."
+              fi
               if grep -Eqi 'TF401027|TF401019|permission|403|denied|not authorized|unauthori' <<<"$out"; then
+                [ -z "${GITHUB_RUN_ID:-}" ] || fail_need actions_write "The code host refused to push $RH_BRANCH: $(tail -c 300 <<<"$out" | tr '\n' ' ') $(permission_help)"
                 fail "The code host refused to push $RH_BRANCH: $(tail -c 300 <<<"$out" | tr '\n' ' ') $(permission_help)"
               fi
               fail "Pushing $RH_BRANCH failed: $(tail -c 400 <<<"$out" | tr '\n' ' ')"
@@ -252,9 +269,12 @@ jobs:
           # start of every session, so the agent knows the project without exploring), kept out of git. A repository that tracks its own
           # CLAUDE.local.md keeps it; the notes then go to .releasehub-context/notes.md.
           NOTES_FILE="CLAUDE.local.md"
+          # What only a person can do, as the agent writes it for ReleaseHub (kept out of git like the notes).
+          NEEDS_FILE=".releasehub-context/needs.json"
           prepare_notes() {
             mkdir -p .releasehub-context
             grep -qx ".releasehub-context/" .git/info/exclude 2>/dev/null || echo ".releasehub-context/" >> .git/info/exclude
+            rm -f "$NEEDS_FILE"
             if git ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1; then
               NOTES_FILE=".releasehub-context/notes.md"
             else
@@ -262,6 +282,20 @@ jobs:
             fi
             jq -r '.memory.notes // ""' "$WORK/context.json" > "$NOTES_FILE"
             cp "$NOTES_FILE" "$WORK/notes.before"
+          }
+          # What only a person can do, as the agent wrote it: up to 10 of {title, why, steps}; anything else is dropped.
+          collect_needs() {
+            echo '[]' > "$WORK/needs.out"
+            [ -s "$NEEDS_FILE" ] || return 0
+            jq -c '[(if type == "array" then . else [.] end)[]
+              | select(type == "object" and (.title | type) == "string" and (.title | length) > 0)
+              | {title: .title[0:200],
+                 why: (if (.why | type) == "string" then .why[0:1000] else null end),
+                 steps: (if (.steps | type) == "string" then .steps[0:6000]
+                   elif (.steps | type) == "array" then ([.steps | to_entries[] | "\(.key + 1). \(.value | tostring)"] | join("\n"))[0:6000]
+                   else null end)}][0:10]' "$NEEDS_FILE" > "$WORK/needs.out" 2>/dev/null \
+              || { echo '[]' > "$WORK/needs.out"; log "The agent's list of what you need to do couldn't be read, so it isn't shown." warning; }
+            return 0
           }
           collect_notes() {
             : > "$WORK/notes.out"
@@ -2078,11 +2112,13 @@ jobs:
               printf '%s%s/_git/%s' "${SYSTEM_COLLECTIONURI:-}" "$(printf '%s' "${SYSTEM_TEAMPROJECT:-}" | sed 's/ /%20/g')" "$1"
             fi
           }
-          git_auth_header() {
+          # How git signs in to the code host, as one "key=value" setting: on GitHub the token helper above, on Azure DevOps the job's own
+          # token as a header (it ends with the job).
+          git_auth() {
             if [ -n "${GITHUB_RUN_ID:-}" ]; then
-              printf 'AUTHORIZATION: basic %s' "$(printf 'x-access-token:%s' "${GH_TOKEN:-}" | base64 | tr -d '\n')"
+              printf 'credential.%s.helper=%s' "${GITHUB_SERVER_URL:-https://github.com}" "$GIT_TOKEN_HELPER"
             else
-              printf 'AUTHORIZATION: bearer %s' "${SYSTEM_ACCESSTOKEN:-}"
+              printf 'http.extraheader=AUTHORIZATION: bearer %s' "${SYSTEM_ACCESSTOKEN:-}"
             fi
           }
           clone_extras() {
@@ -2093,11 +2129,13 @@ jobs:
               dir="$EXTRA_ROOT/$(basename "$name")"
               if [ ! -d "$dir/.git" ]; then
                 mkdir -p "$EXTRA_ROOT"
-                if ! git -c http.extraheader="$(git_auth_header)" clone -q "$(repo_url "$name")" "$dir" 2>"$WORK/clone-err.txt"; then
+                local auth
+                auth=$(git_auth)
+                if ! git -c "$auth" clone -q "$(repo_url "$name")" "$dir" 2>"$WORK/clone-err.txt"; then
                   log "Couldn't clone $name, so the agent works without it: $(said "$WORK/clone-err.txt" | tail -c 200) $(permission_help)" warning
                   continue
                 fi
-                git -C "$dir" config http.extraheader "$(git_auth_header)"
+                git -C "$dir" config "${auth%%=*}" "${auth#*=}"
                 git -C "$dir" config user.name "ReleaseHub agent"
                 git -C "$dir" config user.email "agent@users.noreply.releasehub.app"
               fi
@@ -2215,6 +2253,7 @@ jobs:
           wrap_up() {
             save_session
             collect_notes
+            collect_needs
             upload_screenshots
             save_kit
           }
@@ -2225,7 +2264,7 @@ jobs:
             jq -r --arg stage "$RH_STAGE" --arg notes "$NOTES_FILE" --rawfile files "$WORK/files.txt" --rawfile app "$WORK/app.txt" --rawfile extras "$WORK/extras.txt" \
               --arg browser "$BROWSER" --arg shots "$PWD/$SHOTS_DIR" --arg kit "$PWD/$KIT_DIR" --arg creds "$creds" \
               --arg phone "$PHONE" --arg phoneon "$PHONE_ON" --arg phonetool "$PHONE_TOOL" --rawfile phoneapp "$WORK/phone-app.txt" \
-              --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" '
+              --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" --arg needs "$NEEDS_FILE" --arg github "${GITHUB_RUN_ID:+1}" '
               "You are a coding agent working in the repository " + .repository.name + " for ReleaseHub run " + .run.key + ".\n\n" +
               (if $stage == "answer"
                 then (if .discussing then "You are discussing a change with the person who asked for it (below). You are on its branch: read the actual code. " +
@@ -2332,6 +2371,13 @@ jobs:
                   else "- After your change, capture the same screens with the same names: rh-capture --platform game --phase after --pages \"NAME=scene,NAME2=scene2\". Fix what the pictures show and capture again until it is right.\n" end) +
                 "- Keep a short screen map in your memory file (screen name, scene, what it shows).\n"
               else "" end) +
+              "\n## What only a person can do\nSome things only a person can do: a setting on the code host, an account or a key for another service, a secret, " +
+                "a domain, a payment. Never stop for them and never invent their values: do the rest of the task, then write each one to " + $needs +
+                " as a JSON array of {\"title\": what to do, in a few words; \"why\": what needs it; \"steps\": numbered steps in Markdown that a person can follow " +
+                "(where to click, what to type, with links)}. Write them in the language the task is written in. Leave the file out when nothing is needed." +
+                (if $github == "1" then " ReleaseHub itself checks the token for workflow files, GitHub Pages and the permissions of the workflows: do not list those." else "" end) +
+                (if (.needs // []) | length > 0 then "\nAlready asked of the person (do not ask again): " +
+                  ([.needs[] | .title + (if .done then " (done)" else "" end)] | join("; ")) + "." else "" end) + "\n" +
               "\n## Working efficiently\nEach step you take sends this whole conversation again, so a few large steps cost far less than many small ones, with the same result:\n" +
               "- Put independent commands in one Bash call, read several files in one turn, and make the same change across many files with one script.\n" +
               "- Send long output to a file and show only what matters, for example: command > /tmp/out.log 2>&1; tail -30 /tmp/out.log\n" +
@@ -2393,8 +2439,9 @@ jobs:
                 local resume=()
                 [ -z "$RESUME_ID" ] || resume=(--resume "$RESUME_ID")
                 [ -z "$SESSION_FORK" ] || resume+=(--fork-session)
-                # Notes are kept up to date in every stage (the only file a read-only stage writes).
-                [ "$2" = "plan" ] && tools="Read,Glob,Grep,Edit($NOTES_FILE),Write($NOTES_FILE)"
+                # Notes are kept up to date in every stage, and so is the list of what only a person can do (the only files a read-only
+                # stage writes).
+                [ "$2" = "plan" ] && tools="Read,Glob,Grep,Edit($NOTES_FILE),Write($NOTES_FILE),Edit($NEEDS_FILE),Write($NEEDS_FILE)"
                 local mcp=() agents=()
                 if [ -n "$BROWSER$PHONE$GAME" ]; then
                   # Running the app needs Bash even in a read-only stage; whatever it changes is reset after the stage.
@@ -2485,8 +2532,14 @@ jobs:
             if [ -n "${GITHUB_RUN_ID:-}" ]; then
               num=$(gh pr list --head "$RH_BRANCH" --state open --json number --jq '.[0].number // empty')
               if [ -z "$num" ]; then
-                gh pr create --base "$TARGET" --head "$RH_BRANCH" --title "$1" --body "$body" >/dev/null 2>"$WORK/pr-err.txt" \
-                  || { FAILING=1; fail "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"; }
+                if ! gh pr create --base "$TARGET" --head "$RH_BRANCH" --title "$1" --body "$body" >/dev/null 2>"$WORK/pr-err.txt"; then
+                  FAILING=1
+                  # "GitHub Actions is not permitted to create or approve pull requests": a setting a person changes, or ReleaseHub for them.
+                  if grep -Eqi 'not permitted to create|resource not accessible|403' "$WORK/pr-err.txt"; then
+                    fail_need actions_write "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"
+                  fi
+                  fail "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"
+                fi
                 num=$(gh pr list --head "$RH_BRANCH" --state open --json number --jq '.[0].number')
               fi
               url=$(gh pr view "$num" --json url --jq .url)
@@ -2506,14 +2559,15 @@ jobs:
             # The change itself (cut at 150 KB), for a second opinion when the workspace asks another model to read it.
             git diff "origin/$RH_BASE...HEAD" 2>/dev/null | head -c 150000 > "$WORK/change.diff" || : > "$WORK/change.diff"
             post "$(jq -nc --argjson n "$num" --arg url "$url" --arg sha "$(git rev-parse HEAD)" --argjson f "$files" --argjson u "$USAGE" \
-              --slurpfile x "$WORK/extra-prs.json" --argjson w "$(keep_waiting)" --rawfile diff "$WORK/change.diff" \
-              '{type: "code", pullRequest: {number: $n, url: $url, headSha: $sha}, changedFiles: $f, usage: $u, pullRequests: $x[0], waiting: $w, diff: $diff}')"
+              --slurpfile x "$WORK/extra-prs.json" --argjson w "$(keep_waiting)" --rawfile diff "$WORK/change.diff" --slurpfile needs "$WORK/needs.out" \
+              '{type: "code", pullRequest: {number: $n, url: $url, headSha: $sha}, changedFiles: $f, usage: $u, pullRequests: $x[0], waiting: $w, diff: $diff, needs: $needs[0]}')"
           }
 
           # One stage: plan, answer, change (or revise) or revert, and report the result.
           run_stage() {
             USAGE='null'
             echo '[]' > "$WORK/extra-prs.json"
+            echo '[]' > "$WORK/needs.out"
             case "$RH_STAGE" in
               planning)
                 log "Reading the repository and planning."
@@ -2522,7 +2576,8 @@ jobs:
                 wrap_up
                 git reset --hard -q && git clean -fdq
                 [ -s "$WORK/result.txt" ] || fail "The agent returned an empty plan."
-                post "$(jq -nc --rawfile p "$WORK/result.txt" --argjson u "$USAGE" --argjson w "$(keep_waiting)" '{type: "plan", plan: $p, usage: $u, waiting: $w}')"
+                post "$(jq -nc --rawfile p "$WORK/result.txt" --argjson u "$USAGE" --argjson w "$(keep_waiting)" --slurpfile n "$WORK/needs.out" \
+                  '{type: "plan", plan: $p, usage: $u, waiting: $w, needs: $n[0]}')"
                 ;;
               answer)
                 log "Reading the repository to answer the question."
@@ -2535,7 +2590,7 @@ jobs:
                 wrap_up
                 git reset --hard -q && git clean -fdq
                 [ -s "$WORK/result.txt" ] || fail "The agent returned an empty answer."
-                post "$(jq -nc --rawfile a "$WORK/result.txt" --argjson u "$USAGE" '{type: "answer", answer: $a, usage: $u}')"
+                post "$(jq -nc --rawfile a "$WORK/result.txt" --argjson u "$USAGE" --slurpfile n "$WORK/needs.out" '{type: "answer", answer: $a, usage: $u, needs: $n[0]}')"
                 ;;
               coding|revision)
                 if git ls-remote --exit-code --heads origin "$RH_BRANCH" >/dev/null 2>&1; then
@@ -2641,6 +2696,10 @@ jobs:
 
           git config user.name "ReleaseHub agent"
           git config user.email "agent@users.noreply.releasehub.app"
+          if [ -n "${GITHUB_RUN_ID:-}" ]; then
+            AUTH=$(git_auth)
+            git config "${AUTH%%=*}" "${AUTH#*=}"
+          fi
           trap stop_app EXIT
 
           while :; do
