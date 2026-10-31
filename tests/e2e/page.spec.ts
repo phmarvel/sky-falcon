@@ -4,7 +4,7 @@ import { expect, test, type Page } from '@playwright/test';
 const RATIO = 540 / 960;
 
 async function openGame(page: Page) {
-  await page.goto('./');
+  await page.goto('./?scene=flight');
   await expect(page.locator('#game canvas')).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true);
 }

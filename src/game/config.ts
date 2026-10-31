@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 import { COLORS, GAME_HEIGHT, GAME_WIDTH } from './constants';
 import { fitOnResize } from './fitOnResize';
 import { FlightScene } from './scenes/FlightScene';
+import { StartScene } from './scenes/StartScene';
+import { pickFirstScene } from './scenes/sceneParam';
 
 export { COLORS, GAME_HEIGHT, GAME_WIDTH };
 
@@ -24,7 +26,10 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
       height: GAME_HEIGHT,
     },
     render: { antialias: true },
-    scene: [FlightScene],
+    // Phaser starts the first scene in the list: the start screen, or the run with ?scene=flight.
+    scene: pickFirstScene(typeof location === 'undefined' ? '' : location.search) === 'Flight'
+      ? [FlightScene, StartScene]
+      : [StartScene, FlightScene],
   };
 }
 
