@@ -10,7 +10,7 @@ import {
 } from "../falcon/falconPhysics";
 import { type FalconView, createFalconView } from "../falcon/drawFalcon";
 import { createPressGate } from "../falcon/pressGate";
-import type { ObstacleKind } from "../obstacles/obstacleField";
+import { DATE, type ObstacleKind } from "../obstacles/obstacleField";
 import {
   type ObstacleView,
   createObstacleView,
@@ -52,6 +52,10 @@ export interface ObstacleSnapshot {
   width: number;
   gapTop: number;
   gapBottom: number;
+  /** The date in the gap: where it floats, and whether it has been caught. */
+  dateX: number;
+  dateY: number;
+  dateCaught: boolean;
 }
 
 /**
@@ -184,21 +188,26 @@ export class FlightScene extends Phaser.Scene {
     };
     this.registry.set("falcon", snapshot);
     const obstacles: ObstacleSnapshot[] = (this.run.field?.obstacles ?? []).map(
-      ({ id, kind, x, width, gapTop, gapBottom }) => ({
+      ({ id, kind, x, width, gapTop, gapBottom, date }) => ({
         id,
         kind,
         x,
         width,
         gapTop,
         gapBottom,
+        dateX: x + DATE.offsetX,
+        dateY: date.y,
+        dateCaught: date.caught,
       }),
     );
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
+    this.registry.set("dates", this.run.dates);
     const score = scoreOf(this.run);
     this.scoreView.set(score);
     this.registry.set("score", score);
     this.registry.set("scoreText", this.scoreView.text());
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
+    this.registry.set("datesDrawn", this.obstacleView.datesDrawn());
   }
 }

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { circleHitsRect, falconHitsField } from '../../src/game/obstacles/collision';
-import { type Obstacle, createField } from '../../src/game/obstacles/obstacleField';
+import { circleHitsCircle, circleHitsRect, falconHitsField, falconTouchesDate } from '../../src/game/obstacles/collision';
+import { DATE, type Obstacle, createField } from '../../src/game/obstacles/obstacleField';
 import { SHAPES, obstacleParts } from '../../src/game/obstacles/obstacleShapes';
 
 const rect = { x: 100, y: 100, width: 50, height: 80 };
@@ -70,6 +70,7 @@ describe('falconHitsField', () => {
     gapTop: 200,
     gapBottom: 430,
     passed: false,
+    date: { y: 100 + 115, caught: false },
   });
   const field = (o: Obstacle) => ({ ...createField(1, GROUND, 400), obstacles: [o] });
 
@@ -95,5 +96,33 @@ describe('falconHitsField', () => {
 
   it('nothing far away is touched', () => {
     expect(falconHitsField(162, 100, 22, field(obstacle('tower', 400)))).toBe(false);
+  });
+});
+
+describe('dates', () => {
+  const o = (caught: boolean) => ({
+    id: 1,
+    kind: 'tower' as const,
+    x: 100,
+    width: DATE.offsetX * 2,
+    gapTop: 100,
+    gapBottom: 330,
+    passed: false,
+    date: { y: 215, caught },
+  });
+  const dx = 100 + DATE.offsetX;
+
+  it('circleHitsCircle: touching counts, a hair apart does not', () => {
+    expect(circleHitsCircle(0, 0, 10, 20, 0, 10)).toBe(true);
+    expect(circleHitsCircle(0, 0, 10, 20.01, 0, 10)).toBe(false);
+  });
+
+  it('the falcon touches a date it overlaps, not one just out of reach', () => {
+    expect(falconTouchesDate(dx - 30, 215, 22, o(false))).toBe(true);
+    expect(falconTouchesDate(dx - 38.5, 215, 22, o(false))).toBe(false);
+  });
+
+  it('a caught date can not be touched again', () => {
+    expect(falconTouchesDate(dx, 215, 22, o(true))).toBe(false);
   });
 });

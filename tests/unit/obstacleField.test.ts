@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { FALCON } from '../../src/game/falcon/falconPhysics';
 import {
+  DATE,
   OBSTACLES,
   type ObstacleField,
   createField,
@@ -154,5 +155,24 @@ describe('gaps', () => {
         expect(Math.abs(g - prev)).toBeGreaterThanOrEqual(OBSTACLES.minShift - 1);
       }
     }
+  });
+});
+
+describe('dates', () => {
+  it('every obstacle has an uncaught date inside its gap, in the middle of the obstacle', () => {
+    const all = collect(5, 30);
+    expect(all.length).toBeGreaterThan(5);
+    for (const o of all) {
+      expect(o.date.caught).toBe(false);
+      expect(o.date.y - DATE.radius).toBeGreaterThanOrEqual(o.gapTop);
+      expect(o.date.y + DATE.radius).toBeLessThanOrEqual(o.gapBottom);
+      expect(DATE.offsetX).toBe(o.width / 2);
+    }
+  });
+
+  it('adding dates did not change the layout for a seed', () => {
+    const a = collect(9, 20).map((o) => [o.kind, o.gapTop]);
+    const b = collect(9, 20).map((o) => [o.kind, o.gapTop]);
+    expect(a).toEqual(b);
   });
 });

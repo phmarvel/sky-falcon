@@ -27,6 +27,13 @@ export const OBSTACLES = {
   firstGapMargin: 60,
 } as const;
 
+/** The date floating in the middle of each gap: catching it is worth one point. */
+export const DATE = {
+  radius: 16,
+  /** Distance from the obstacle's left edge to the date's centre: the middle of the obstacle. */
+  offsetX: OBSTACLES.width / 2,
+} as const;
+
 export type ObstacleKind = 'tower' | 'palm';
 
 export interface Obstacle {
@@ -40,6 +47,8 @@ export interface Obstacle {
   gapBottom: number;
   /** True once the falcon has gone past it. */
   passed: boolean;
+  /** The date in the gap: centred on the obstacle, halfway between `gapTop` and `gapBottom`. */
+  date: { y: number; caught: boolean };
 }
 
 export interface ObstacleField {
@@ -125,6 +134,7 @@ function spawn(field: ObstacleField, x: number): ObstacleField {
     gapTop,
     gapBottom: gapTop + OBSTACLES.gapSize,
     passed: false,
+    date: { y: gapTop + OBSTACLES.gapSize / 2, caught: false },
   };
   return {
     ...field,
