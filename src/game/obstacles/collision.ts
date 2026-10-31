@@ -1,4 +1,4 @@
-import type { ObstacleField } from './obstacleField';
+import { DATE, type Obstacle, type ObstacleField } from './obstacleField';
 import { type Rect, obstacleParts } from './obstacleShapes';
 
 /** Whether a circle touches (or overlaps) a rectangle: the closest point of the rectangle is within the radius. */
@@ -21,4 +21,18 @@ export function falconHitsField(cx: number, cy: number, r: number, field: Obstac
     }
   }
   return false;
+}
+
+/** Whether two circles touch (or overlap). */
+export function circleHitsCircle(ax: number, ay: number, ar: number, bx: number, by: number, br: number): boolean {
+  const dx = ax - bx;
+  const dy = ay - by;
+  const reach = ar + br;
+  return dx * dx + dy * dy <= reach * reach;
+}
+
+/** Whether the falcon (a circle at `cx`, `cy`) touches the obstacle's date. A caught date can't be touched again. */
+export function falconTouchesDate(cx: number, cy: number, r: number, o: Obstacle): boolean {
+  if (o.date.caught) return false;
+  return circleHitsCircle(cx, cy, r, o.x + DATE.offsetX, o.date.y, DATE.radius);
 }
