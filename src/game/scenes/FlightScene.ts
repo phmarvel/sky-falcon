@@ -2,9 +2,14 @@ import Phaser from 'phaser';
 import { GAME_HEIGHT, GAME_WIDTH } from '../constants';
 import { buildDesertLayout } from '../background/desertLayout';
 import { drawDesert } from '../background/drawDesert';
-import { type FalconBounds, type FalconState, advanceFalcon, createFalcon, flap } from '../falcon/falconPhysics';
+import { type FalconBounds, type FalconState, createFalcon, flap } from '../falcon/falconPhysics';
 import { type FalconView, createFalconView } from '../falcon/drawFalcon';
 import { createPressGate } from '../falcon/pressGate';
+import type { ObstacleKind } from '../obstacles/obstacleField';
+import { type ObstacleView, createObstacleView } from '../obstacles/drawObstacles';
+import { randomSeed } from '../obstacles/random';
+import { autopilotWantsFlap } from '../run/autopilot';
+import { type RunOverReason, type RunState, advanceRun, createRun, parseRunOptions } from '../run/runState';
 
 /** What the scene shares in the registry; the browser tests read it. */
 export interface FalconSnapshot {
@@ -17,16 +22,33 @@ export interface FalconSnapshot {
   groundY: number;
 }
 
-/** The run: the desert, and the falcon that flaps and falls. The first flap starts the run; touching the ground ends it. */
+/** One obstacle as the registry shares it. */
+export interface ObstacleSnapshot {
+  id: number;
+  kind: ObstacleKind;
+  x: number;
+  width: number;
+  gapTop: number;
+  gapBottom: number;
+}
+
+/**
+ * The run: the desert, the falcon that flaps and falls, and the towers and palm trees coming from the right.
+ * The first flap starts the run; touching the ground or an obstacle ends it.
+ * Address settings: `?seed=N` gives the same obstacles every time; `?obstacles=off` flies without them;
+ * `?autopilot=1` plays by itself (a demo for screenshots).
+ */
 export class FlightScene extends Phaser.Scene {
   static readonly KEY = 'Flight';
-  /** Sent once when the falcon touches the ground. */
+  /** Sent once when the run ends, with the reason ('ground' or 'obstacle'). */
   static readonly RUN_OVER = 'run-over';
 
-  private falcon!: FalconState;
+  private run!: RunState;
   private view!: FalconView;
+  private obstacleView!: ObstacleView;
   private bounds!: FalconBounds;
   private readonly keys = createPressGate();
+  private autopilot = false;
 
   constructor() {
     super(FlightScene.KEY);
@@ -37,9 +59,12 @@ export class FlightScene extends Phaser.Scene {
     drawDesert(this, layout);
 
     this.bounds = { top: 0, groundY: layout.horizonY };
-    this.falcon = createFalcon();
+    const options = parseRunOptions(window.location.search);
+    this.autopilot = options.autopilot;
+    this.run = createRun(createFalcon(), this.bounds, options.seed ?? randomSeed(), options.obstacles);
+    this.obstacleView = createObstacleView(this, this.bounds.groundY);
     this.view = createFalconView(this, this.bounds.groundY);
-    this.view.update(this.falcon, this.time.now);
+    this.view.update(this.run.falcon, this.time.now);
 
     // Pointer covers the mouse and touch; Phaser stops the browser's copied mouse events after a touch.
     this.input.on(Phaser.Input.Events.POINTER_DOWN, this.onFlap, this);
@@ -52,17 +77,20 @@ export class FlightScene extends Phaser.Scene {
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.stopInput());
 
     this.registry.set('runOver', false);
+    this.registry.set('runOverReason', null);
     this.publish();
     this.registry.set('ready', true);
   }
 
   update(time: number, delta: number): void {
-    if (this.falcon.phase === 'flying') {
-      this.falcon = advanceFalcon(this.falcon, delta, this.bounds);
-      if (this.falcon.phase === 'down') this.endRun();
+    if (this.autopilot && autopilotWantsFlap(this.run)) this.onFlap();
+    if (this.run.falcon.phase === 'flying') {
+      this.run = advanceRun(this.run, delta, this.bounds);
+      this.obstacleView.sync(this.run.field);
+      if (this.run.over) this.endRun(this.run.over);
       this.publish();
     }
-    this.view.update(this.falcon, time);
+    this.view.update(this.run.falcon, time);
   }
 
   private onSpaceDown(event: KeyboardEvent): void {
@@ -74,17 +102,20 @@ export class FlightScene extends Phaser.Scene {
   }
 
   private onFlap(): void {
-    if (this.falcon.phase === 'down') return;
-    this.falcon = flap(this.falcon);
+    if (this.run.over || this.run.falcon.phase === 'down') return;
+    this.run = { ...this.run, falcon: flap(this.run.falcon) };
     this.view.flapWing();
     this.publish();
   }
 
-  private endRun(): void {
-    // Until the game over screen exists, the run simply stops: the falcon lies on the sand and ignores input.
+  private endRun(reason: RunOverReason): void {
+    // Until the game over screen exists, the run simply stops: the obstacles freeze, the falcon ends up on the sand
+    // (dropping there after an obstacle) and ignores input.
     this.stopInput();
+    if (reason === 'obstacle') this.view.fallFrom(this.run.falcon.y);
     this.registry.set('runOver', true);
-    this.events.emit(FlightScene.RUN_OVER);
+    this.registry.set('runOverReason', reason);
+    this.events.emit(FlightScene.RUN_OVER, reason);
   }
 
   private stopInput(): void {
@@ -94,8 +125,14 @@ export class FlightScene extends Phaser.Scene {
   }
 
   private publish(): void {
-    const { y, vy, phase, flaps, time } = this.falcon;
+    const { y, vy, phase, flaps, time } = this.run.falcon;
     const snapshot: FalconSnapshot = { y, vy, phase, flaps, time, groundY: this.bounds.groundY };
     this.registry.set('falcon', snapshot);
+    const obstacles: ObstacleSnapshot[] = (this.run.field?.obstacles ?? []).map(
+      ({ id, kind, x, width, gapTop, gapBottom }) => ({ id, kind, x, width, gapTop, gapBottom }),
+    );
+    this.registry.set('obstacles', obstacles);
+    this.registry.set('passed', this.run.passed);
+    this.registry.set('obstaclesDrawn', this.obstacleView.count());
   }
 }

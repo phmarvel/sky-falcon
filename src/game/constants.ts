@@ -19,4 +19,13 @@ export const COLORS = {
   falconEye: 0x1d1410,
   falconOutline: 0x3a2414,
   shadow: 0x8a5a24,
+  towerStone: 0xc9824a,
+  towerShade: 0xa9653a,
+  towerTrim: 0xf0d3a0,
+  towerWindow: 0x4a2a18,
+  towerOutline: 0x6b3b1f,
+  palmTrunk: 0x8b5a2b,
+  palmTrunkRing: 0x5e3a1a,
+  palmLeaf: 0x3f9a4a,
+  palmLeafDark: 0x2a6e35,
 } as const;

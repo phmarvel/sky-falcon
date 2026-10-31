@@ -29,8 +29,9 @@ test.beforeEach(async ({ page, browserName }) => {
   }
 });
 
-async function openGame(page: Page) {
-  await page.goto('./');
+/** These tests are about the falcon alone, so they fly without obstacles (`?obstacles=off`): none can end a run early. */
+async function openGame(page: Page, query = '?obstacles=off') {
+  await page.goto(`./${query}`);
   await expect(page.locator('#game canvas')).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,
