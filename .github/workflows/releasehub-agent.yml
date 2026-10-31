@@ -2,7 +2,7 @@
 # Commit it as .github/workflows/releasehub-agent.yml on main, then add these repository secrets
 # (Settings > Secrets and variables > Actions):
 #   RELEASEHUB_RUNNER_SECRET: the agent's runner secret from ReleaseHub
-#   ANTHROPIC_API_KEY: an Anthropic API key (Claude Code)
+#   CLAUDE_CODE_OAUTH_TOKEN: a Claude Pro / Max subscription token (run `claude setup-token` signed in to the subscription and copy the token it prints)
 #   RELEASEHUB_GIT_TOKEN (recommended): a token that may push and open pull requests, so the pull
 #     request's own checks run (GitHub doesn't start workflows for changes pushed with the default token)
 name: ReleaseHub agent
