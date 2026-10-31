@@ -35,6 +35,9 @@ export const COLORS = {
   panelEdge: 0x3a2414,
 } as const;
 
+/** Draw order of the score: above the obstacles (0) and the falcon (10), under the game over screen (100). */
+export const SCORE_DEPTH = 50;
+
 /** Text styles for the screens. */
 export const UI = {
   fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',

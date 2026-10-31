@@ -18,6 +18,7 @@ import {
 import { randomSeed } from "../obstacles/random";
 import { getLangStore } from "../i18n/langStore";
 import { getBestScoreStore } from "../score/bestScore";
+import { type ScoreView, createScoreView } from "../score/drawScore";
 import { scoreOf } from "../score/runScore";
 import { showGameOver } from "../ui/GameOverScreen";
 import { autopilotWantsFlap } from "../run/autopilot";
@@ -67,6 +68,7 @@ export class FlightScene extends Phaser.Scene {
   private run!: RunState;
   private view!: FalconView;
   private obstacleView!: ObstacleView;
+  private scoreView!: ScoreView;
   private bounds!: FalconBounds;
   private readonly keys = createPressGate();
   private autopilot = false;
@@ -89,6 +91,7 @@ export class FlightScene extends Phaser.Scene {
       options.obstacles,
     );
     this.obstacleView = createObstacleView(this, this.bounds.groundY);
+    this.scoreView = createScoreView(this, getLangStore().get());
     this.view = createFalconView(this, this.bounds.groundY);
     this.view.update(this.run.falcon, this.time.now);
 
@@ -104,7 +107,6 @@ export class FlightScene extends Phaser.Scene {
 
     this.registry.set("ready", false);
     this.registry.set("screen", "flight");
-    this.registry.set("score", 0);
     this.registry.set("runOver", false);
     this.registry.set("runOverReason", null);
     this.registry.set("gameOver", null);
@@ -193,6 +195,10 @@ export class FlightScene extends Phaser.Scene {
     );
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
+    const score = scoreOf(this.run);
+    this.scoreView.set(score);
+    this.registry.set("score", score);
+    this.registry.set("scoreText", this.scoreView.text());
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
   }
 }
