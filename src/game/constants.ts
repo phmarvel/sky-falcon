@@ -12,4 +12,11 @@ export const COLORS = {
   duneNear: 0xd9a04f,
   sand: 0xe3b261,
   sandRipple: 0xc98d3f,
+  falconBody: 0x7a4a2a,
+  falconWing: 0x55301b,
+  falconBelly: 0xf3e2c0,
+  falconBeak: 0xf2b632,
+  falconEye: 0x1d1410,
+  falconOutline: 0x3a2414,
+  shadow: 0x8a5a24,
 } as const;
