@@ -57,8 +57,12 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
   const falcon = stepFalcon(state.falcon, dt, bounds);
   if (!state.field) return falcon.phase === 'down' ? { ...state, falcon, over: 'ground' } : { ...state, falcon };
 
-  let passed = state.passed;
   const moved = stepField(state.field, dt);
+  if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, moved)) {
+    // A touch ends the run with no point for this step.
+    return { falcon: crash(falcon), field: moved, passed: state.passed, over: 'obstacle' };
+  }
+  let passed = state.passed;
   const field: ObstacleField = {
     ...moved,
     obstacles: moved.obstacles.map((o) => {
@@ -67,9 +71,6 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
       return { ...o, passed: true };
     }),
   };
-  if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, field)) {
-    return { falcon: crash(falcon), field, passed, over: 'obstacle' };
-  }
   if (falcon.phase === 'down') return { falcon, field, passed, over: 'ground' };
   return { falcon, field, passed, over: null };
 }

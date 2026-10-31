@@ -102,6 +102,72 @@ describe('stepRun', () => {
   });
 });
 
+describe('passed (the score)', () => {
+  it('starts at 0, also without obstacles', () => {
+    expect(createRun(createFalcon(), bounds, 1).passed).toBe(0);
+    expect(flyLevel(started(1, false), 400, 3).passed).toBe(0);
+  });
+
+  it('adds one only once the obstacle is fully behind the falcon, and only once', () => {
+    let run = withObstacle({ x: 300 }, 250 + OBSTACLES.gapSize / 2);
+    const y = run.falcon.y;
+    let top = 0;
+    for (let i = 0; i < 120 * 3 && !run.over; i++) {
+      run = stepRun({ ...run, falcon: { ...run.falcon, y, vy: 0 } }, STEP_SECONDS, bounds);
+      const o = run.field!.obstacles.find((x) => x.id === 1);
+      if (o && o.x + o.width >= FALCON.x - FALCON.radius) expect(run.passed).toBe(0);
+      top = Math.max(top, run.passed);
+    }
+    expect(run.over).toBeNull();
+    expect(top).toBe(1);
+    expect(run.passed).toBe(1);
+  });
+
+  it('counts 1, 2 and 3 for an autopilot flying past obstacles one by one', () => {
+    for (const target of [1, 2, 3]) {
+      let run = started(3);
+      for (let i = 0; i < 120 * 600 && !run.over && run.passed < target; i++) {
+        if (autopilotWantsFlap(run)) run = { ...run, falcon: flap(run.falcon) };
+        const before = run.passed;
+        run = stepRun(run, STEP_SECONDS, bounds);
+        expect(run.passed - before).toBeLessThanOrEqual(1);
+      }
+      expect(run.over).toBeNull();
+      expect(run.passed).toBe(target);
+    }
+  });
+
+  it('gives no point for the obstacle that is touched', () => {
+    const run = flyLevel(withObstacle({ x: 150 }, 100), 100, 2);
+    expect(run.over).toBe('obstacle');
+    expect(run.passed).toBe(0);
+  });
+
+  it('a hit on the same step adds no point', () => {
+    // One obstacle just behind the falcon's back edge, another being hit by the falcon.
+    const run = withObstacle({ x: 300 }, 600);
+    const edge = FALCON.x - FALCON.radius;
+    const done: Obstacle = { ...run.field!.obstacles[0]!, id: 5, x: edge - OBSTACLES.width + 0.5, passed: false };
+    const hit: Obstacle = { ...done, id: 6, x: FALCON.x - 10, gapTop: 100, gapBottom: 100 + OBSTACLES.gapSize };
+    const next = stepRun({ ...run, field: { ...run.field!, obstacles: [done, hit] } }, STEP_SECONDS, bounds);
+    expect(next.over).toBe('obstacle');
+    expect(next.passed).toBe(0);
+  });
+
+  it('a finished run keeps its score', () => {
+    const over = flyLevel(withObstacle({ x: 150 }, 100), 100, 2);
+    expect(stepRun(over, STEP_SECONDS, bounds)).toBe(over);
+    expect(advanceRun(over, 500, bounds).passed).toBe(over.passed);
+  });
+
+  it('touching the ground adds nothing', () => {
+    let run = started(2);
+    for (let i = 0; i < 120 * 5 && !run.over; i++) run = stepRun(run, STEP_SECONDS, bounds);
+    expect(run.over).toBe('ground');
+    expect(run.passed).toBe(0);
+  });
+});
+
 describe('every gap is reachable', () => {
   /** The simple player of the demo mode, deciding once per frame of `frameMs`. */
   function autopilot(seed: number, obstaclesToPass: number, frameMs = 1000 / 60) {
