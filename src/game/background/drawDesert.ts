@@ -1,5 +1,5 @@
-import Phaser from "phaser";
-import { type DesertLayout, skyColorAt } from "./desertLayout";
+import Phaser from 'phaser';
+import { type DesertLayout, skyColorAt } from './desertLayout';
 
 /** Depth of the background: everything later stories add (falcon, obstacles, text) sits above it. */
 export const BACKGROUND_DEPTH = -100;
@@ -7,10 +7,7 @@ export const BACKGROUND_DEPTH = -100;
 const SKY_BANDS = 64;
 
 /** Draws the desert layout with simple shapes and returns the Graphics object. */
-export function drawDesert(
-  scene: Phaser.Scene,
-  layout: DesertLayout,
-): Phaser.GameObjects.Graphics {
+export function drawDesert(scene: Phaser.Scene, layout: DesertLayout): Phaser.GameObjects.Graphics {
   const g = scene.add.graphics().setDepth(BACKGROUND_DEPTH);
   const { sky, sun, dunes, sand, width } = layout;
 
@@ -22,11 +19,7 @@ export function drawDesert(
   }
 
   // A soft glow: a few faint rings, wider ones fainter.
-  for (const [share, alpha] of [
-    [1, 0.12],
-    [0.8, 0.18],
-    [0.65, 0.25],
-  ] as const) {
+  for (const [share, alpha] of [[1, 0.12], [0.8, 0.18], [0.65, 0.25]] as const) {
     g.fillStyle(sun.glowColor, alpha);
     g.fillCircle(sun.x, sun.y, sun.glowRadius * share);
   }

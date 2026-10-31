@@ -1,19 +1,19 @@
-import { DEFAULT_LANG, type Lang } from "./strings";
+import { DEFAULT_LANG, type Lang } from './strings';
 
 /** The chosen language kept on the device. */
-export const LANG_KEY = "skyFalcon.lang";
+export const LANG_KEY = 'skyFalcon.lang';
 
-type LangStorage = Pick<Storage, "getItem" | "setItem">;
+type LangStorage = Pick<Storage, 'getItem' | 'setItem'>;
 
 /** A stored or typed value as a language; anything else is null. */
 export function parseLang(raw: string | null | undefined): Lang | null {
   const value = raw?.trim().toLowerCase();
-  return value === "en" || value === "ar" ? value : null;
+  return value === 'en' || value === 'ar' ? value : null;
 }
 
 /** `?lang=ar|en` from the address, or null. */
 export function langFromSearch(search: string): Lang | null {
-  return parseLang(new URLSearchParams(search).get("lang"));
+  return parseLang(new URLSearchParams(search).get('lang'));
 }
 
 export interface LangStore {
@@ -25,10 +25,7 @@ export interface LangStore {
  * Before a switch the language is `override` (from the address), else the saved one, else the default.
  * `storage` may be missing or blocked; a switch then lasts for this visit (kept in memory).
  */
-export function createLangStore(
-  storage?: LangStorage,
-  override: Lang | null = null,
-): LangStore {
+export function createLangStore(storage?: LangStorage, override: Lang | null = null): LangStore {
   let memory: Lang | null = null;
   const stored = (): Lang | null => {
     try {

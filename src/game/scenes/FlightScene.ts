@@ -15,11 +15,12 @@ import {
   type ObstacleView,
   createObstacleView,
 } from "../obstacles/drawObstacles";
-import { getLangStore } from "../i18n/langStore";
 import { randomSeed } from "../obstacles/random";
-import { autopilotWantsFlap } from "../run/autopilot";
-import { type ScoreView, createScoreView } from "../score/drawScore";
+import { getLangStore } from "../i18n/langStore";
+import { getBestScoreStore } from "../score/bestScore";
 import { scoreOf } from "../score/runScore";
+import { showGameOver } from "../ui/GameOverScreen";
+import { autopilotWantsFlap } from "../run/autopilot";
 import {
   type RunOverReason,
   type RunState,
@@ -27,6 +28,9 @@ import {
   createRun,
   parseRunOptions,
 } from "../run/runState";
+
+/** How long the falcon is left alone on the sand before the game over screen covers it. */
+const GAME_OVER_DELAY_MS = { ground: 300, obstacle: 900 } as const;
 
 /** What the scene shares in the registry; the browser tests read it. */
 export interface FalconSnapshot {
@@ -63,7 +67,6 @@ export class FlightScene extends Phaser.Scene {
   private run!: RunState;
   private view!: FalconView;
   private obstacleView!: ObstacleView;
-  private scoreView!: ScoreView;
   private bounds!: FalconBounds;
   private readonly keys = createPressGate();
   private autopilot = false;
@@ -86,7 +89,6 @@ export class FlightScene extends Phaser.Scene {
       options.obstacles,
     );
     this.obstacleView = createObstacleView(this, this.bounds.groundY);
-    this.scoreView = createScoreView(this, getLangStore().get());
     this.view = createFalconView(this, this.bounds.groundY);
     this.view.update(this.run.falcon, this.time.now);
 
@@ -102,8 +104,10 @@ export class FlightScene extends Phaser.Scene {
 
     this.registry.set("ready", false);
     this.registry.set("screen", "flight");
+    this.registry.set("score", 0);
     this.registry.set("runOver", false);
     this.registry.set("runOverReason", null);
+    this.registry.set("gameOver", null);
     this.publish();
     this.registry.set("ready", true);
   }
@@ -135,13 +139,29 @@ export class FlightScene extends Phaser.Scene {
   }
 
   private endRun(reason: RunOverReason): void {
-    // Until the game over screen exists, the run simply stops: the obstacles freeze, the falcon ends up on the sand
-    // (dropping there after an obstacle) and ignores input.
+    // The obstacles freeze, the falcon ends up on the sand (dropping there after an obstacle) and ignores input;
+    // then the game over screen shows the score and the best score (saved on the device when beaten).
     this.stopInput();
     if (reason === "obstacle") this.view.fallFrom(this.run.falcon.y);
+    const { best, isNewBest } = getBestScoreStore().record(scoreOf(this.run));
+    const score = scoreOf(this.run);
     this.registry.set("runOver", true);
     this.registry.set("runOverReason", reason);
     this.events.emit(FlightScene.RUN_OVER, reason);
+    // Scene time, so slow frames do not shorten it; after an obstacle the falcon first drops to the sand.
+    this.time.delayedCall(
+      reason === "obstacle"
+        ? GAME_OVER_DELAY_MS.obstacle
+        : GAME_OVER_DELAY_MS.ground,
+      () =>
+        showGameOver(this, {
+          score,
+          best,
+          isNewBest,
+          lang: getLangStore().get(),
+          onPlayAgain: () => this.scene.restart(),
+        }),
+    );
   }
 
   private stopInput(): void {
@@ -173,10 +193,6 @@ export class FlightScene extends Phaser.Scene {
     );
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
-    const score = scoreOf(this.run);
-    this.scoreView.set(score);
-    this.registry.set("score", score);
-    this.registry.set("scoreText", this.scoreView.text());
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
   }
 }

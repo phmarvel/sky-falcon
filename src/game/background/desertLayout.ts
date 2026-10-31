@@ -1,4 +1,4 @@
-import { COLORS } from "../constants";
+import { COLORS } from '../constants';
 
 export interface Point {
   x: number;
@@ -23,21 +23,9 @@ export interface DesertLayout {
   height: number;
   horizonY: number;
   sky: { top: number; bottom: number; height: number; stops: GradientStop[] };
-  sun: {
-    x: number;
-    y: number;
-    radius: number;
-    color: number;
-    glowColor: number;
-    glowRadius: number;
-  };
+  sun: { x: number; y: number; radius: number; color: number; glowColor: number; glowRadius: number };
   dunes: Dune[];
-  sand: {
-    y: number;
-    height: number;
-    color: number;
-    ripples: { y: number; color: number }[];
-  };
+  sand: { y: number; height: number; color: number; ripples: { y: number; color: number }[] };
 }
 
 /** Where the horizon sits, as a share of the height. */
@@ -45,19 +33,12 @@ export const HORIZON_RATIO = 0.78;
 
 const RIDGE_STEPS = 24;
 
-function ridge(
-  width: number,
-  baseY: number,
-  height: number,
-  waves: number,
-  phase: number,
-): Point[] {
+function ridge(width: number, baseY: number, height: number, waves: number, phase: number): Point[] {
   const points: Point[] = [];
   for (let i = 0; i <= RIDGE_STEPS; i++) {
     const x = (width * i) / RIDGE_STEPS;
     // A smooth wave between 0 and 1, so the ridge stays between baseY - height and baseY.
-    const wave =
-      (Math.sin((i / RIDGE_STEPS) * Math.PI * 2 * waves + phase) + 1) / 2;
+    const wave = (Math.sin((i / RIDGE_STEPS) * Math.PI * 2 * waves + phase) + 1) / 2;
     points.push({ x, y: baseY - height * (0.35 + 0.65 * wave) });
   }
   points.push({ x: width, y: baseY }, { x: 0, y: baseY });
@@ -95,25 +76,14 @@ export function buildDesertLayout(width: number, height: number): DesertLayout {
       glowRadius: sunRadius * 1.6,
     },
     dunes: [
-      {
-        color: COLORS.duneFar,
-        height: farHeight,
-        points: ridge(width, horizonY, farHeight, 1.5, 0.6),
-      },
-      {
-        color: COLORS.duneNear,
-        height: nearHeight,
-        points: ridge(width, horizonY, nearHeight, 2.5, 2.1),
-      },
+      { color: COLORS.duneFar, height: farHeight, points: ridge(width, horizonY, farHeight, 1.5, 0.6) },
+      { color: COLORS.duneNear, height: nearHeight, points: ridge(width, horizonY, nearHeight, 2.5, 2.1) },
     ],
     sand: {
       y: horizonY,
       height: sandHeight,
       color: COLORS.sand,
-      ripples: [0.25, 0.5, 0.75].map((share) => ({
-        y: horizonY + sandHeight * share,
-        color: COLORS.sandRipple,
-      })),
+      ripples: [0.25, 0.5, 0.75].map((share) => ({ y: horizonY + sandHeight * share, color: COLORS.sandRipple })),
     },
   };
 }
@@ -134,12 +104,7 @@ export function skyColorAt(stops: GradientStop[], at: number): number {
   for (let i = 1; i < stops.length; i++) {
     const prev = stops[i - 1];
     const next = stops[i];
-    if (t <= next.at)
-      return mixColor(
-        prev.color,
-        next.color,
-        (t - prev.at) / (next.at - prev.at || 1),
-      );
+    if (t <= next.at) return mixColor(prev.color, next.color, (t - prev.at) / (next.at - prev.at || 1));
   }
   return stops[stops.length - 1].color;
 }

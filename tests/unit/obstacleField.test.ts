@@ -1,5 +1,5 @@
-import { describe, expect, it } from "vitest";
-import { FALCON } from "../../src/game/falcon/falconPhysics";
+import { describe, expect, it } from 'vitest';
+import { FALCON } from '../../src/game/falcon/falconPhysics';
 import {
   OBSTACLES,
   type ObstacleField,
@@ -8,23 +8,22 @@ import {
   isOffScreen,
   nextGap,
   stepField,
-} from "../../src/game/obstacles/obstacleField";
-import { createRandom } from "../../src/game/obstacles/random";
+} from '../../src/game/obstacles/obstacleField';
+import { createRandom } from '../../src/game/obstacles/random';
 
 const GROUND = 749;
 const DT = 1 / 120;
 const INTERVAL = OBSTACLES.spacing / OBSTACLES.speed;
 
 function run(field: ObstacleField, seconds: number): ObstacleField {
-  for (let i = 0; i < Math.round(seconds / DT); i++)
-    field = stepField(field, DT);
+  for (let i = 0; i < Math.round(seconds / DT); i++) field = stepField(field, DT);
   return field;
 }
 
 /** Every obstacle the field ever made in `seconds`, in order. */
 function collect(seed: number, seconds: number) {
   let field = createField(seed, GROUND, FALCON.startY);
-  const seen = new Map<number, ObstacleField["obstacles"][number]>();
+  const seen = new Map<number, ObstacleField['obstacles'][number]>();
   for (let i = 0; i < Math.round(seconds / DT); i++) {
     field = stepField(field, DT);
     for (const o of field.obstacles) if (!seen.has(o.id)) seen.set(o.id, o);
@@ -32,14 +31,14 @@ function collect(seed: number, seconds: number) {
   return [...seen.values()];
 }
 
-describe("stepField", () => {
-  it("adds the first obstacle just off the right edge on the first step", () => {
+describe('stepField', () => {
+  it('adds the first obstacle just off the right edge on the first step', () => {
     const field = stepField(createField(1, GROUND, FALCON.startY), DT);
     expect(field.obstacles).toHaveLength(1);
     expect(field.obstacles[0].x).toBe(OBSTACLES.spawnX);
   });
 
-  it("moves every obstacle left at a steady speed", () => {
+  it('moves every obstacle left at a steady speed', () => {
     const before = run(createField(1, GROUND, FALCON.startY), 1);
     const after = stepField(before, 0.25);
     for (const o of before.obstacles) {
@@ -48,7 +47,7 @@ describe("stepField", () => {
     }
   });
 
-  it("keeps adding obstacles from the right at regular intervals, exactly `spacing` apart", () => {
+  it('keeps adding obstacles from the right at regular intervals, exactly `spacing` apart', () => {
     let field = createField(3, GROUND, FALCON.startY);
     const spawnTimes: number[] = [];
     let t = 0;
@@ -58,10 +57,8 @@ describe("stepField", () => {
       t += DT;
       if (field.nextId !== before) spawnTimes.push(t);
       const xs = field.obstacles.map((o) => o.x);
-      for (let k = 1; k < xs.length; k++)
-        expect(xs[k] - xs[k - 1]).toBeCloseTo(OBSTACLES.spacing, 6);
-      for (const x of xs)
-        expect(x).toBeLessThanOrEqual(OBSTACLES.spawnX + 1e-6);
+      for (let k = 1; k < xs.length; k++) expect(xs[k] - xs[k - 1]).toBeCloseTo(OBSTACLES.spacing, 6);
+      for (const x of xs) expect(x).toBeLessThanOrEqual(OBSTACLES.spawnX + 1e-6);
     }
     expect(spawnTimes.length).toBeGreaterThanOrEqual(Math.floor(20 / INTERVAL));
     for (let k = 1; k < spawnTimes.length; k++) {
@@ -69,7 +66,7 @@ describe("stepField", () => {
     }
   });
 
-  it("removes an obstacle once it is fully past the left edge, not before", () => {
+  it('removes an obstacle once it is fully past the left edge, not before', () => {
     let field = createField(1, GROUND, FALCON.startY);
     let lastSeen = Infinity;
     for (let i = 0; i < Math.round(8 / DT); i++) {
@@ -89,39 +86,34 @@ describe("stepField", () => {
     expect(lastSeen + OBSTACLES.width).toBeGreaterThanOrEqual(0);
   });
 
-  it("never keeps an obstacle that is fully off screen", () => {
+  it('never keeps an obstacle that is fully off screen', () => {
     let field = createField(9, GROUND, FALCON.startY);
     for (let i = 0; i < Math.round(30 / DT); i++) {
       field = stepField(field, DT);
-      for (const o of field.obstacles)
-        expect(o.x + o.width).toBeGreaterThanOrEqual(0);
+      for (const o of field.obstacles) expect(o.x + o.width).toBeGreaterThanOrEqual(0);
     }
     expect(field.obstacles.length).toBeLessThanOrEqual(3);
   });
 
-  it("mixes towers and palm trees, never more than two of a kind in a row", () => {
+  it('mixes towers and palm trees, never more than two of a kind in a row', () => {
     const all = collect(11, 120);
-    expect(all.some((o) => o.kind === "tower")).toBe(true);
-    expect(all.some((o) => o.kind === "palm")).toBe(true);
+    expect(all.some((o) => o.kind === 'tower')).toBe(true);
+    expect(all.some((o) => o.kind === 'palm')).toBe(true);
     for (let k = 2; k < all.length; k++) {
-      expect(
-        all[k].kind === all[k - 1].kind && all[k].kind === all[k - 2].kind,
-      ).toBe(false);
+      expect(all[k].kind === all[k - 1].kind && all[k].kind === all[k - 2].kind).toBe(false);
     }
   });
 
-  it("gives the same obstacles for the same seed", () => {
+  it('gives the same obstacles for the same seed', () => {
     expect(collect(42, 10)).toEqual(collect(42, 10));
-    expect(collect(42, 10).map((o) => o.gapTop)).not.toEqual(
-      collect(43, 10).map((o) => o.gapTop),
-    );
+    expect(collect(42, 10).map((o) => o.gapTop)).not.toEqual(collect(43, 10).map((o) => o.gapTop));
   });
 });
 
-describe("gaps", () => {
+describe('gaps', () => {
   const range = gapRange(GROUND);
 
-  it("every gap is fully inside the playing area and big enough for the falcon", () => {
+  it('every gap is fully inside the playing area and big enough for the falcon', () => {
     for (const seed of [1, 2, 3, 4, 5]) {
       const all = collect(seed, 400);
       expect(all.length).toBeGreaterThan(200);
@@ -134,11 +126,9 @@ describe("gaps", () => {
     }
   });
 
-  it("gaps are not all at the same height, and each moves a reachable amount from the one before", () => {
+  it('gaps are not all at the same height, and each moves a reachable amount from the one before', () => {
     const all = collect(7, 60);
-    expect(new Set(all.slice(0, 10).map((o) => o.gapTop)).size).toBeGreaterThan(
-      5,
-    );
+    expect(new Set(all.slice(0, 10).map((o) => o.gapTop)).size).toBeGreaterThan(5);
     for (let k = 1; k < all.length; k++) {
       const shift = Math.abs(all[k].gapTop - all[k - 1].gapTop);
       expect(shift).toBeGreaterThanOrEqual(OBSTACLES.minShift - 1);
@@ -146,28 +136,22 @@ describe("gaps", () => {
     }
   });
 
-  it("the first gap is around the falcon start height", () => {
+  it('the first gap is around the falcon start height', () => {
     for (let seed = 0; seed < 50; seed++) {
       const top = nextGap(undefined, createRandom(seed), GROUND, FALCON.startY);
-      expect(FALCON.startY - top).toBeGreaterThanOrEqual(
-        OBSTACLES.firstGapMargin - 1,
-      );
-      expect(top + OBSTACLES.gapSize - FALCON.startY).toBeGreaterThanOrEqual(
-        OBSTACLES.firstGapMargin - 1,
-      );
+      expect(FALCON.startY - top).toBeGreaterThanOrEqual(OBSTACLES.firstGapMargin - 1);
+      expect(top + OBSTACLES.gapSize - FALCON.startY).toBeGreaterThanOrEqual(OBSTACLES.firstGapMargin - 1);
     }
   });
 
-  it("nextGap stays in range even from the very top or bottom", () => {
+  it('nextGap stays in range even from the very top or bottom', () => {
     const rnd = createRandom(5);
     for (let i = 0; i < 500; i++) {
       for (const prev of [range.min, range.max]) {
         const g = nextGap(prev, rnd, GROUND, FALCON.startY);
         expect(g).toBeGreaterThanOrEqual(range.min);
         expect(g).toBeLessThanOrEqual(range.max);
-        expect(Math.abs(g - prev)).toBeGreaterThanOrEqual(
-          OBSTACLES.minShift - 1,
-        );
+        expect(Math.abs(g - prev)).toBeGreaterThanOrEqual(OBSTACLES.minShift - 1);
       }
     }
   });

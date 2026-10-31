@@ -30,17 +30,19 @@ export const COLORS = {
   palmLeafDark: 0x2a6e35,
   button: 0x2f7d4f,
   buttonEdge: 0x1c4f32,
+  overlay: 0x1d1410,
+  panel: 0xfff4d6,
+  panelEdge: 0x3a2414,
 } as const;
-
-/** Draw order of the score: above the obstacles (0) and the falcon (10). */
-export const SCORE_DEPTH = 50;
 
 /** Text styles for the screens. */
 export const UI = {
   fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',
-  title: "#fff4d6",
-  titleStroke: "#3a2414",
-  bestText: "#fff4d6",
-  buttonText: "#ffffff",
-  switchText: "#fff4d6",
+  title: '#fff4d6',
+  titleStroke: '#3a2414',
+  bestText: '#fff4d6',
+  buttonText: '#ffffff',
+  switchText: '#fff4d6',
+  panelText: '#3a2414',
+  newBest: '#b5470d',
 } as const;

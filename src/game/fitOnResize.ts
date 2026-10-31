@@ -1,4 +1,4 @@
-import Phaser from "phaser";
+import Phaser from 'phaser';
 
 /** How long the window has to stay the same size before the canvas is fitted again. */
 export const RESIZE_SETTLE_MS = 150;
@@ -10,10 +10,7 @@ export const RESIZE_SETTLE_MS = 150;
  * bounds read stores the new size without refreshing, so the canvas keeps the old size. Re-reading the parent and refreshing
  * after the size settles fixes that. Returns a function that removes the listeners.
  */
-export function fitOnResize(
-  game: Phaser.Game,
-  settleMs = RESIZE_SETTLE_MS,
-): () => void {
+export function fitOnResize(game: Phaser.Game, settleMs = RESIZE_SETTLE_MS): () => void {
   let timer: ReturnType<typeof setTimeout> | undefined;
 
   const fit = () => {
@@ -25,17 +22,17 @@ export function fitOnResize(
     timer = setTimeout(fit, settleMs);
   };
 
-  window.addEventListener("resize", schedule);
-  window.addEventListener("orientationchange", schedule);
-  window.visualViewport?.addEventListener("resize", schedule);
-  screen.orientation?.addEventListener?.("change", schedule);
+  window.addEventListener('resize', schedule);
+  window.addEventListener('orientationchange', schedule);
+  window.visualViewport?.addEventListener('resize', schedule);
+  screen.orientation?.addEventListener?.('change', schedule);
 
   const stop = () => {
     clearTimeout(timer);
-    window.removeEventListener("resize", schedule);
-    window.removeEventListener("orientationchange", schedule);
-    window.visualViewport?.removeEventListener("resize", schedule);
-    screen.orientation?.removeEventListener?.("change", schedule);
+    window.removeEventListener('resize', schedule);
+    window.removeEventListener('orientationchange', schedule);
+    window.visualViewport?.removeEventListener('resize', schedule);
+    screen.orientation?.removeEventListener?.('change', schedule);
   };
   game.events.once(Phaser.Core.Events.DESTROY, stop);
   return stop;
