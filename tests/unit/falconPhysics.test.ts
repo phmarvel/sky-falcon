@@ -136,6 +136,15 @@ describe('advanceFalcon', () => {
   });
 });
 
+describe('game time', () => {
+  it('counts the time flown, not the time between frames', () => {
+    const s = advanceFalcon(flying(), 5000, bounds);
+    expect(s.time).toBeCloseTo(MAX_FRAME_MS / 1000, 6);
+    expect(createFalcon().time).toBe(0);
+    expect(run(flying(), 12).at(-1)!.time).toBeCloseTo(12 * STEP_SECONDS, 9);
+  });
+});
+
 describe('falconTilt', () => {
   it('points up when climbing, down when diving, within limits', () => {
     expect(falconTilt(FALCON.flapVelocity, 'flying')).toBeCloseTo(MIN_TILT);

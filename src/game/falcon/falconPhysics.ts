@@ -33,6 +33,8 @@ export interface FalconState {
   flaps: number;
   /** Time not yet simulated, carried to the next frame (seconds). */
   carry: number;
+  /** Game time the falcon has flown in this run (seconds). Slower than real time when frames are capped. */
+  time: number;
 }
 
 export interface FalconBounds {
@@ -43,7 +45,7 @@ export interface FalconBounds {
 }
 
 export function createFalcon(y: number = FALCON.startY): FalconState {
-  return { y, vy: 0, phase: 'ready', flaps: 0, carry: 0 };
+  return { y, vy: 0, phase: 'ready', flaps: 0, carry: 0, time: 0 };
 }
 
 /** A flap: starts the run from 'ready', pushes the falcon up while flying, and does nothing once it is down. */
@@ -56,18 +58,19 @@ export function flap(state: FalconState): FalconState {
 export function stepFalcon(state: FalconState, dt: number, bounds: FalconBounds): FalconState {
   if (state.phase !== 'flying') return state;
   const vy = Math.min(state.vy + FALCON.gravity * dt, FALCON.maxFallSpeed);
+  const time = state.time + dt;
   let y = state.y + vy * dt;
   const ceiling = bounds.top + FALCON.radius;
   if (y <= ceiling) {
     // Held at the top edge; the upward speed is lost so it doesn't stick there.
-    return { ...state, y: ceiling, vy: Math.max(vy, 0) };
+    return { ...state, y: ceiling, vy: Math.max(vy, 0), time };
   }
   const floor = bounds.groundY - FALCON.radius;
   if (y >= floor) {
     y = floor;
-    return { ...state, y, vy: 0, phase: 'down', carry: 0 };
+    return { ...state, y, vy: 0, phase: 'down', carry: 0, time };
   }
-  return { ...state, y, vy };
+  return { ...state, y, vy, time };
 }
 
 /** Moves the falcon on by one frame of `elapsedMs`, in fixed steps. */

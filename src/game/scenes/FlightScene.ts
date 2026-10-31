@@ -12,6 +12,8 @@ export interface FalconSnapshot {
   vy: number;
   phase: FalconState['phase'];
   flaps: number;
+  /** Game seconds flown in this run; tests measure against it, not the wall clock. */
+  time: number;
   groundY: number;
 }
 
@@ -92,8 +94,8 @@ export class FlightScene extends Phaser.Scene {
   }
 
   private publish(): void {
-    const { y, vy, phase, flaps } = this.falcon;
-    const snapshot: FalconSnapshot = { y, vy, phase, flaps, groundY: this.bounds.groundY };
+    const { y, vy, phase, flaps, time } = this.falcon;
+    const snapshot: FalconSnapshot = { y, vy, phase, flaps, time, groundY: this.bounds.groundY };
     this.registry.set('falcon', snapshot);
   }
 }
