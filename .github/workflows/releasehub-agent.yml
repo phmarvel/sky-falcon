@@ -1,0 +1,2652 @@
+# ReleaseHub agent: runs Sky Falcon agent's AI work for ReleaseHub runs in this repository.
+# Commit it as .github/workflows/releasehub-agent.yml on main, then add these repository secrets
+# (Settings > Secrets and variables > Actions):
+#   RELEASEHUB_RUNNER_SECRET: the agent's runner secret from ReleaseHub
+#   ANTHROPIC_API_KEY: an Anthropic API key (Claude Code)
+#   RELEASEHUB_GIT_TOKEN (recommended): a token that may push and open pull requests, so the pull
+#     request's own checks run (GitHub doesn't start workflows for changes pushed with the default token)
+name: ReleaseHub agent
+run-name: ReleaseHub ${{ inputs.stage }} for ${{ inputs.branch }}
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: ReleaseHub run
+        required: true
+      dispatch:
+        description: Dispatch number
+        required: true
+      stage:
+        description: planning, coding, revision or revert
+        required: true
+      provider:
+        description: claude-code, codex or copilot
+        required: true
+      api_url:
+        description: ReleaseHub API
+        required: true
+      tenant:
+        description: ReleaseHub workspace
+        required: true
+      branch:
+        description: Branch the agent works on
+        required: true
+      base_branch:
+        description: Branch the pull request targets
+        required: true
+permissions:
+  contents: write
+  pull-requests: write
+concurrency:
+  group: releasehub-${{ inputs.run_id }}
+  cancel-in-progress: true
+jobs:
+  agent:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
+          token: ${{ secrets.RELEASEHUB_GIT_TOKEN || github.token }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.npm
+            ~/.cache/ms-playwright
+          key: releasehub-agent-${{ runner.os }}-v1
+          restore-keys: releasehub-agent-${{ runner.os }}-
+      - name: Run the agent
+        env:
+          RH_SECRET: ${{ secrets.RELEASEHUB_RUNNER_SECRET }}
+          RH_API: ${{ inputs.api_url }}
+          RH_TENANT: ${{ inputs.tenant }}
+          RH_RUN: ${{ inputs.run_id }}
+          RH_DISPATCH: ${{ inputs.dispatch }}
+          RH_STAGE: ${{ inputs.stage }}
+          RH_PROVIDER: ${{ inputs.provider }}
+          RH_BRANCH: ${{ inputs.branch }}
+          RH_BASE: ${{ inputs.base_branch }}
+          GH_TOKEN: ${{ secrets.RELEASEHUB_GIT_TOKEN || github.token }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          CLAUDE_CODE_OAUTH_TOKEN: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          COPILOT_GITHUB_TOKEN: ${{ secrets.COPILOT_GITHUB_TOKEN }}
+          RH_PREVIEW_USER: ${{ secrets.RH_PREVIEW_USER }}
+          RH_PREVIEW_PASSWORD: ${{ secrets.RH_PREVIEW_PASSWORD }}
+        run: |
+          cat > "$RUNNER_TEMP/releasehub-agent.sh" <<'RELEASEHUB'
+          #!/usr/bin/env bash
+          # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
+          set -euo pipefail
+          RH_SCRIPT_VERSION="936f5e0ab7fe"
+          API="${RH_API%/}"
+          EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
+          WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
+          mkdir -p "$WORK"
+          # The agent's helpers (rh-verify, rh-capture), on its PATH.
+          TOOLS="$WORK/tools"
+          USAGE='null'
+          FAILING=''
+          if [ -n "${GITHUB_RUN_ID:-}" ]; then
+            RUN_ID="$GITHUB_RUN_ID"
+            RUN_URL="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID"
+          else
+            RUN_ID="${BUILD_BUILDID:-}"
+            RUN_URL="${SYSTEM_COLLECTIONURI:-}${SYSTEM_TEAMPROJECT:-}/_build/results?buildId=${BUILD_BUILDID:-}"
+          fi
+
+          # The same script runs on Linux and on the hosted Macs phone apps need (plan 1.33), which have bash 3.2 and no GNU coreutils.
+          size_of() { wc -c < "$1" | tr -d ' '; }
+          sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
+          new_id() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-Z' 'a-z'; }
+          # Runs a command for at most $1 seconds.
+          within() {
+            local seconds=$1
+            shift
+            if command -v timeout >/dev/null 2>&1; then timeout "$seconds" "$@"; else perl -e 'alarm shift; exec @ARGV' "$seconds" "$@"; fi
+          }
+
+          sign() {
+            local ts sig
+            ts=$(date +%s)
+            sig=$(printf '%s.%s' "$ts" "$1" | openssl dgst -sha256 -hmac "$RH_SECRET" -hex | sed 's/^.*= //')
+            printf '%s sha256=%s' "$ts" "$sig"
+          }
+
+          post() {
+            local body ts sig code
+            [ -f "$WORK/notes.out" ] || : > "$WORK/notes.out"
+            # A stage's result carries the repository notes the agent updated, for the next run.
+            body=$(jq -c --arg id "$(new_id)" --argjson d "$RH_DISPATCH" --arg rid "$RUN_ID" --arg url "$RUN_URL" \
+              --rawfile notes "$WORK/notes.out" \
+              '. + {eventId: $id, dispatch: $d, externalRunId: $rid, externalRunUrl: $url}
+               | if (.type == "plan" or .type == "code" or .type == "answer") and $notes != "" then . + {notes: $notes} else . end' <<<"$1")
+            read -r ts sig <<<"$(sign "$body")"
+            code=$(curl -sS --retry 3 --retry-all-errors -o "$WORK/answer.json" -w '%{http_code}' -X POST "$EVENTS" \
+              -H 'Content-Type: application/json' -H "tenant: $RH_TENANT" \
+              -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" --data-binary "$body" || echo 000)
+            if [ "$code" = "409" ] || [ "$code" = "410" ]; then
+              echo "ReleaseHub: $(cat "$WORK/answer.json" 2>/dev/null)"
+              echo "The run moved on; stopping."
+              exit 0
+            fi
+            if [ "${code:0:1}" != "2" ]; then
+              echo "ReleaseHub answered $code: $(cat "$WORK/answer.json" 2>/dev/null)" >&2
+              return 1
+            fi
+          }
+
+          log() { post "$(jq -nc --arg m "$1" --arg l "${2:-info}" '{type: "log", level: $l, message: $m}')" || true; }
+
+          fail() {
+            FAILING=1
+            post "$(jq -nc --arg m "$1" --argjson u "$USAGE" '{type: "failed", message: $m, usage: $u}')" || true
+            echo "$1" >&2
+            exit 1
+          }
+
+          # The provider's usage limit (a Claude subscription's 5-hour or weekly limit) or a rate limit: ReleaseHub keeps the run
+          # waiting and sends this stage again once the limit resets, so this is not a failure.
+          LIMIT_RE='usage limit|limit reached|rate.?limit|too many requests|[^0-9]429[^0-9]|overloaded|[^0-9]529[^0-9]|hit your limit'
+          limited() {
+            FAILING=1
+            post "$(jq -nc --arg m "$1" --arg r "${2:-}" --argjson u "$USAGE" \
+              '{type: "limited", message: $m, usage: $u} + (if $r != "" then {resetAt: $r} else {} end)')" || true
+            echo "The provider's usage limit stopped this stage: $1"
+            echo "ReleaseHub starts it again when the limit resets."
+            exit 0
+          }
+
+          # What a stopped tool said (its result, then the end of its error output), on one line.
+          said() { { cat "$@" 2>/dev/null || true; } | tr '\n' ' ' | sed 's/  */ /g' | tail -c 600; }
+
+          on_error() { [ -n "$FAILING" ] || fail "The runner stopped unexpectedly at line $1 ($2); see the workflow log."; }
+          trap 'on_error $LINENO "${BASH_COMMAND:0:120}"' ERR
+
+          # What to do when the code host refuses the runner (the CI job's own token lacks a permission).
+          permission_help() {
+            if [ -n "${GITHUB_RUN_ID:-}" ]; then
+              printf '%s' "Give the workflow write access: repository Settings > Actions > General > Workflow permissions > Read and write, and allow GitHub Actions to create pull requests."
+            else
+              printf '%s' "Give the pipeline's build service access: Project settings > Repositories > $BUILD_REPOSITORY_NAME > Security > \"$SYSTEM_TEAMPROJECT Build Service\" > allow Contribute, Create branch and Contribute to pull requests."
+            fi
+          }
+
+          # Pushes the agent's branch; a refusal names the missing permission instead of a line number.
+          push_branch() {
+            local out
+            if ! out=$(git push -q origin "$RH_BRANCH" 2>&1); then
+              FAILING=1
+              if grep -Eqi 'TF401027|TF401019|permission|403|denied|not authorized|unauthori' <<<"$out"; then
+                fail "The code host refused to push $RH_BRANCH: $(tail -c 300 <<<"$out" | tr '\n' ' ') $(permission_help)"
+              fi
+              fail "Pushing $RH_BRANCH failed: $(tail -c 400 <<<"$out" | tr '\n' ' ')"
+            fi
+          }
+
+          # The current dispatch's context (signed). A run that moved on stops the job.
+          fetch_context() {
+            local ts sig code
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH")"
+            code=$(curl -sS --retry 3 --retry-all-errors -o "$WORK/context.json" -w '%{http_code}' \
+              "$API/api/v1/ai/runner/runs/$RH_RUN/context?dispatch=$RH_DISPATCH" \
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+            case "$code" in
+              2*) ;;
+              409|410) echo "The run moved on; stopping."; exit 0 ;;
+              *) echo "Couldn't read the run's context from ReleaseHub ($code). Check RELEASEHUB_RUNNER_SECRET and the API address." >&2; exit 1 ;;
+            esac
+            BILLING=$(jq -r '.run.billing // "api-key"' "$WORK/context.json")
+            # The stage's model as ReleaseHub's roles name it (empty: the tool picks its own), and the helpers' (empty: the lead's).
+            MODEL=$(jq -r '.run.model // empty' "$WORK/context.json")
+            HELPER_MODEL=$(jq -r '.run.helperModel // empty' "$WORK/context.json")
+            KEY=$(jq -r '.run.key' "$WORK/context.json")
+            TITLE=$(jq -r '.run.title' "$WORK/context.json")
+            RUN_LINK=$(jq -r '.links.run // empty' "$WORK/context.json")
+            # Where the pull request goes: the base unless the agent or its starter chose another (start from master, into dev).
+            TARGET=$(jq -r '.repository.targetBranch // empty' "$WORK/context.json")
+            [ -n "$TARGET" ] || TARGET="$RH_BASE"
+          }
+          fetch_context
+
+          # Azure Pipelines passes "$(NAME)" for a variable that isn't set: treat it as empty.
+          for name in ANTHROPIC_API_KEY CLAUDE_CODE_OAUTH_TOKEN OPENAI_API_KEY COPILOT_GITHUB_TOKEN RH_PREVIEW_USER RH_PREVIEW_PASSWORD; do
+            # shellcheck disable=SC2016 # the literal text "$(", not an expansion
+            case "${!name:-}" in '$('*) unset "$name" ;; esac
+          done
+
+          # The task's attachments and the images in its text, downloaded (signed) into a folder git ignores, for the agent to read.
+          FILES_DIR=".releasehub-context/files"
+          : > "$WORK/files.txt"
+          fetch_files() {
+            local count i name safe ts sig code
+            count=$(jq -r '(.files // []) | length' "$WORK/context.json")
+            [ "$count" -gt 0 ] || return 0
+            mkdir -p "$FILES_DIR"
+            grep -qx ".releasehub-context/" .git/info/exclude 2>/dev/null || echo ".releasehub-context/" >> .git/info/exclude
+            : > "$WORK/files.txt"
+            while read -r file; do
+              i=$(jq -r '.index' <<<"$file")
+              name=$(jq -r '.name' <<<"$file")
+              safe=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80)
+              read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.$i")"
+              code=$(curl -sS --retry 2 -o "$FILES_DIR/$i-$safe" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/files/$i?dispatch=$RH_DISPATCH" \
+                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              if [ "${code:0:1}" = "2" ]; then
+                printf -- '- %s/%s-%s (%s: %s)\n' "$FILES_DIR" "$i" "$safe" "$(jq -r '.kind' <<<"$file")" "$name" >> "$WORK/files.txt"
+              else
+                rm -f "$FILES_DIR/$i-$safe"
+                log "Couldn't download the task file $name ($code); going on without it." warning
+              fi
+            done < <(jq -c '.files[]' "$WORK/context.json")
+            [ -s "$WORK/files.txt" ] && log "Downloaded $(wc -l < "$WORK/files.txt") task file(s) for the agent."
+            return 0
+          }
+
+          # What earlier runs learned about this repository: Claude Code's own memory file (CLAUDE.local.md, loaded automatically at the
+          # start of every session, so the agent knows the project without exploring), kept out of git. A repository that tracks its own
+          # CLAUDE.local.md keeps it; the notes then go to .releasehub-context/notes.md.
+          NOTES_FILE="CLAUDE.local.md"
+          prepare_notes() {
+            mkdir -p .releasehub-context
+            grep -qx ".releasehub-context/" .git/info/exclude 2>/dev/null || echo ".releasehub-context/" >> .git/info/exclude
+            if git ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1; then
+              NOTES_FILE=".releasehub-context/notes.md"
+            else
+              grep -qx "CLAUDE.local.md" .git/info/exclude 2>/dev/null || echo "CLAUDE.local.md" >> .git/info/exclude
+            fi
+            jq -r '.memory.notes // ""' "$WORK/context.json" > "$NOTES_FILE"
+            cp "$NOTES_FILE" "$WORK/notes.before"
+          }
+          collect_notes() {
+            : > "$WORK/notes.out"
+            [ -f "$NOTES_FILE" ] || return 0
+            if ! cmp -s "$NOTES_FILE" "$WORK/notes.before"; then head -c 16000 "$NOTES_FILE" > "$WORK/notes.out"; fi
+            return 0
+          }
+
+          # The agent's conversation from the earlier stage (or the run this one follows up), so it goes on instead of starting over.
+          RESUME_ID=""
+          SESSION_FORK=""
+          restore_session() {
+            RESUME_ID=""
+            SESSION_FORK=""
+            [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            [ "$(jq -r '.run.session // false' "$WORK/context.json")" = "true" ] || return 0
+            local ts sig code id folder here
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.session")"
+            code=$(curl -sS --retry 2 -D "$WORK/session.h" -o "$WORK/session.gz" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/session?dispatch=$RH_DISPATCH" \
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+            [ "${code:0:1}" = "2" ] || return 0
+            id=$(grep -i '^x-releasehub-session-id:' "$WORK/session.h" | cut -d' ' -f2- | tr -d '\r')
+            # Another run's conversation, continued as a copy: the original stays as it was.
+            if grep -qi '^x-releasehub-session-fork: true' "$WORK/session.h"; then SESSION_FORK=1; else SESSION_FORK=""; fi
+            folder=$(grep -i '^x-releasehub-session-folder:' "$WORK/session.h" | cut -d' ' -f2- | tr -d '\r')
+            case "$id$folder" in *[!A-Za-z0-9._-]*|"") return 0 ;; esac
+            # Claude Code keeps a session under a folder named after the working directory: put it there (and where it was saved).
+            here=$(pwd | sed 's/[^A-Za-z0-9]/-/g')
+            for dir in "$HOME/.claude/projects/$here" "$HOME/.claude/projects/$folder"; do
+              mkdir -p "$dir" && gunzip -c "$WORK/session.gz" > "$dir/$id.jsonl" 2>/dev/null || true
+            done
+            RESUME_ID="$id"
+            log "Continuing the agent's earlier conversation."
+          }
+
+          # Saves the agent's conversation for the next stage (gzipped, signed over its SHA-256).
+          save_session() {
+            [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            local id file folder sha ts sig
+            id=$(jq -r '.session_id // empty' "$WORK/out.json" 2>/dev/null)
+            case "$id" in ""|*[!A-Za-z0-9-]*) return 0 ;; esac
+            file=$(ls -t "$HOME"/.claude/projects/*/"$id".jsonl 2>/dev/null | head -1)
+            [ -n "$file" ] || return 0
+            folder=$(basename "$(dirname "$file")")
+            gzip -c "$file" > "$WORK/session.out.gz"
+            [ "$(size_of "$WORK/session.out.gz")" -le 15728640 ] || { log "The agent's conversation is too big to keep; the next stage starts fresh." warning; return 0; }
+            sha=$(sha256_of "$WORK/session.out.gz" | cut -d' ' -f1)
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.session.$sha")"
+            curl -sS --retry 2 -o /dev/null -X POST "$API/api/v1/ai/runner/runs/$RH_RUN/session?dispatch=$RH_DISPATCH&sessionId=$id&folder=$folder" \
+              -H 'Content-Type: application/gzip' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
+              -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$WORK/session.out.gz" || true
+          }
+
+          # A browser for the agent (Playwright MCP, headless Chromium) when the repository has a web app: it runs the app, looks at
+          # the pages and saves screenshots before and after its change. What it builds to run the app (mock data, start scripts) is
+          # the repository's preview kit, kept in ReleaseHub for the next run.
+          BROWSER=""
+          SHOTS_DIR=".releasehub-context/screenshots"
+          KIT_DIR=".releasehub-context/preview"
+          setup_browser() {
+            # A later stage in the same job (after a hand-over) reuses the browser set up for the first one.
+            if [ -n "${BROWSER_READY:-}" ]; then BROWSER=1; return 0; fi
+            BROWSER=""
+            [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            [ "$(jq -r '.browser.enabled // false' "$WORK/context.json")" = "true" ] || return 0
+            [ -n "$(find . -maxdepth 3 -name package.json -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ] || return 0
+            mkdir -p "$SHOTS_DIR" "$KIT_DIR"
+            restore_kit
+            log "Setting up a browser so the agent can see the app."
+            # Already there on your own machine; system libraries only when the browser can't start without them.
+            if [ "$(playwright-mcp --version 2>/dev/null)" != "Version 0.0.83" ] && ! npm install -g @playwright/mcp@0.0.83 >/dev/null 2>"$WORK/browser-err.txt"; then
+              log "Could not set up the browser ($(said "$WORK/browser-err.txt" | tail -c 200)); the agent works without seeing the app." warning
+              return 0
+            fi
+            if ! { playwright-mcp install-browser chromium >/dev/null 2>>"$WORK/browser-err.txt" && browser_starts; } \
+              && ! { playwright-mcp install-browser --with-deps chromium >/dev/null 2>>"$WORK/browser-err.txt" && browser_starts; }; then
+              log "Could not set up the browser ($(said "$WORK/browser-err.txt" | tail -c 200)); the agent works without seeing the app." warning
+              return 0
+            fi
+            # rh-capture uses the Playwright the browser tool installed, so the browser is downloaded once.
+            RH_NPM_ROOT=$(npm root -g)
+            export RH_NPM_ROOT
+            local extra=()
+            [ ! -f "$WORK/preview.env" ] || extra=(--secrets "$WORK/preview.env")
+            jq -n --arg out "$PWD/$SHOTS_DIR" --arg secrets "${extra[1]:-}" '{mcpServers: {playwright: {command: "playwright-mcp",
+              args: (["--headless", "--isolated", "--browser", "chromium", "--no-sandbox", "--caps", "network",
+                "--viewport-size", "1440x900", "--output-dir", $out] + (if $secrets != "" then ["--secrets", $secrets] else [] end))}}}' > "$WORK/mcp.json"
+            BROWSER=1
+            BROWSER_READY=1
+          }
+
+          # The test account: the browser and rh-capture type it in for the agent, which only ever sees the names (it isn't in the
+          # agent's environment).
+          keep_test_account() {
+            if [ -n "${RH_PREVIEW_USER:-}" ] && [ -n "${RH_PREVIEW_PASSWORD:-}" ]; then
+              (umask 077; printf 'RH_PREVIEW_USER=%s\nRH_PREVIEW_PASSWORD=%s\n' "$RH_PREVIEW_USER" "$RH_PREVIEW_PASSWORD" > "$WORK/preview.env")
+              export RH_PREVIEW_ENV="$WORK/preview.env"
+            fi
+            unset RH_PREVIEW_USER RH_PREVIEW_PASSWORD
+          }
+
+          # A phone for the agent (plan 1.33) when the repository has an iPhone or Android app: rh-capture starts the iPhone simulator
+          # (a Mac with Xcode) or the Android emulator itself, builds the app and opens it there. Here the runner asks what this machine
+          # can open, adds Maestro (tap flows; it needs Java 17) and the phone tool (mobile-mcp: tap, type, swipe, read the screen), and
+          # says plainly when the machine can't. The phones rh-capture started are stopped when the job ends.
+          PHONE=""
+          PHONE_TOOL=""
+          PHONE_ON=""
+          PHONE_TOOL_VERSION="1.0.11"
+          setup_phone() {
+            if [ -n "${PHONE_READY:-}" ]; then PHONE=1; return 0; fi
+            PHONE=""
+            [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            [ "$(jq -r '.browser.enabled // false' "$WORK/context.json")" = "true" ] || return 0
+            local wants platform key name line
+            wants=$(jq -r '(.browser.phone // []) | join(",")' "$WORK/context.json")
+            "$TOOLS/rh-capture" --phones > "$WORK/phones.txt" 2>&1 || true
+            # The checkout says it too (plan 1.35): a phone app ReleaseHub didn't know of, or one new on this branch.
+            [ -n "$wants" ] || wants=$(sed -n 's/^here: //p' "$WORK/phones.txt" | grep -v '^none$' | tr -d ' ' || true)
+            [ -n "$wants" ] || return 0
+            mkdir -p "$SHOTS_DIR" "$KIT_DIR"
+            [ -f "$WORK/kit.before" ] || restore_kit
+            export RH_PHONES_STARTED="$WORK/phones-started.txt"
+            for platform in iOS Android; do
+              case ",$wants," in *",$platform,"*) ;; *) continue ;; esac
+              key=$(printf '%s' "$platform" | tr 'A-Z' 'a-z')
+              name="Android"
+              [ "$platform" != "iOS" ] || name="iPhone"
+              line=$(grep "^$key: " "$WORK/phones.txt" | head -1 || true)
+              [ -n "$line" ] || line="$key: not here: rh-capture couldn't tell ($(said "$WORK/phones.txt" | tail -c 160))."
+              case "$line" in
+                *": ready ("*)
+                  PHONE=1
+                  line=${line#*ready (}
+                  PHONE_ON="${PHONE_ON:+$PHONE_ON; }the $name app on ${line%)}"
+                  log "The agent can open the $name app on this machine (${line%)})."
+                  ;;
+                *)
+                  log "The agent can't open the $name app on this machine, so it works without seeing it: ${line#*not here: }" warning
+                  ;;
+              esac
+            done
+            [ -n "$PHONE" ] || return 0
+            if ! command -v maestro >/dev/null 2>&1 && [ ! -x "$HOME/.maestro/bin/maestro" ] && java_17; then
+              curl -fsSL "https://get.maestro.mobile.dev" | bash > "$WORK/maestro-install.txt" 2>&1 \
+                || log "Couldn't install Maestro, so the agent opens the app's screens by links only: $(said "$WORK/maestro-install.txt" | tail -c 200)" warning
+            fi
+            [ ! -d "$HOME/.maestro/bin" ] || export PATH="$PATH:$HOME/.maestro/bin"
+            if npm ls -g --depth=0 "@mobilenext/mobile-mcp@$PHONE_TOOL_VERSION" >/dev/null 2>&1 \
+              || npm install -g "@mobilenext/mobile-mcp@$PHONE_TOOL_VERSION" >/dev/null 2>"$WORK/phone-tool-err.txt"; then
+              PHONE_TOOL=1
+              [ -f "$WORK/mcp.json" ] || echo '{"mcpServers": {}}' > "$WORK/mcp.json"
+              jq '.mcpServers.mobile = {command: "mcp-server-mobile", args: [], env: {MOBILEMCP_DISABLE_TELEMETRY: "1"}}' "$WORK/mcp.json" > "$WORK/mcp.tmp"
+              mv "$WORK/mcp.tmp" "$WORK/mcp.json"
+            else
+              log "Couldn't add the phone tool ($(said "$WORK/phone-tool-err.txt" | tail -c 200)); the agent still takes pictures with rh-capture." warning
+            fi
+            PHONE_READY=1
+          }
+
+          # A game made with an engine (plan 1.34): Godot, Unity or Unreal, found by its project file near the top of the repository.
+          # Its pictures come from its own picture mode, which rh-capture runs; here the runner says what this machine has for it.
+          GAME=""
+          setup_game() {
+            GAME=""
+            [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            [ "$(jq -r '.browser.enabled // false' "$WORK/context.json")" = "true" ] || return 0
+            if [ -n "$(find . -maxdepth 3 -name project.godot -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+              GAME="Godot"
+            elif [ -n "$(find . -maxdepth 4 -path '*ProjectSettings/ProjectVersion.txt' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+              GAME="Unity"
+            elif [ -n "$(find . -maxdepth 3 -name '*.uproject' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+              GAME="Unreal"
+            fi
+            [ -n "$GAME" ] || return 0
+            mkdir -p "$SHOTS_DIR" "$KIT_DIR"
+            [ -f "$WORK/kit.before" ] || restore_kit
+            "$TOOLS/rh-capture" --games > "$WORK/games.txt" 2>&1 || true
+            log "This repository holds a $GAME game: the agent takes its pictures through the picture mode of the game ($(grep -E '^(godot|unity|screen): ' "$WORK/games.txt" | tr '\n' ';' | sed 's/;$//; s/;/; /g'))."
+          }
+
+          # Whether Java 17 or newer is here (Maestro needs it).
+          java_17() {
+            local version
+            version=$(java -version 2>&1 | head -1 | sed -E 's/.*version "([0-9]+).*/\1/')
+            case "$version" in ''|*[!0-9]*) return 1 ;; esac
+            [ "$version" -ge 17 ]
+          }
+
+          # Whether the browser the browser tool installed starts here (it may need system libraries first).
+          browser_starts() {
+            RH_NPM_ROOT=$(npm root -g) node -e '
+              const path = require("path");
+              const { createRequire } = require("module");
+              const { chromium } = createRequire(path.join(process.env.RH_NPM_ROOT, "@playwright/mcp/package.json"))("playwright");
+              chromium.launch({ args: ["--no-sandbox"] }).then((b) => b.close()).then(() => process.exit(0), () => process.exit(1));
+            ' >/dev/null 2>>"$WORK/browser-err.txt"
+          }
+
+          kit_hash() {
+            { find "$KIT_DIR" -type f -not -path '*/node_modules/*' 2>/dev/null || true; } | LC_ALL=C sort | while IFS= read -r f; do sha256_of "$f"; done | sha256_of | cut -d' ' -f1
+          }
+
+          restore_kit() {
+            local ts sig code
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.kit")"
+            code=$(curl -sS --retry 2 -o "$WORK/kit.tgz" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/preview-kit?dispatch=$RH_DISPATCH" \
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+            if [ "${code:0:1}" = "2" ] && tar -xzf "$WORK/kit.tgz" -C "$KIT_DIR" --no-same-owner 2>/dev/null; then
+              log "Restored the preview kit earlier runs made for this app."
+            fi
+            kit_hash > "$WORK/kit.before"
+          }
+
+          save_kit() {
+            [ -n "$BROWSER$PHONE$GAME" ] && [ -d "$KIT_DIR" ] || return 0
+            [ -n "$(find "$KIT_DIR" -type f -not -path '*/node_modules/*' -print -quit)" ] || return 0
+            [ "$(kit_hash)" != "$(cat "$WORK/kit.before" 2>/dev/null)" ] || return 0
+            local sha ts sig
+            tar -czf "$WORK/kit.out.tgz" -C "$KIT_DIR" --exclude=node_modules .
+            [ "$(size_of "$WORK/kit.out.tgz")" -le 2097152 ] || { log "The preview kit is over 2 MB, so it is not kept; keep mock data small." warning; return 0; }
+            sha=$(sha256_of "$WORK/kit.out.tgz" | cut -d' ' -f1)
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.kit.$sha")"
+            curl -sS --retry 2 -o /dev/null -X POST "$API/api/v1/ai/runner/runs/$RH_RUN/preview-kit?dispatch=$RH_DISPATCH" \
+              -H 'Content-Type: application/gzip' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
+              -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$WORK/kit.out.tgz" && log "Kept the preview kit for the next run." || true
+          }
+
+          # Sends the screenshots the agent saved to the run's page (signed over the name and the file's SHA-256).
+          upload_screenshots() {
+            [ -d "$SHOTS_DIR" ] || return 0
+            local f name sha ts sig code sent=0
+            while IFS= read -r f; do
+              name=$(basename "$f")
+              name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-120)
+              case "$name" in page-*) continue ;; esac
+              [ "$(size_of "$f")" -le 5242880 ] || { log "Skipped the screenshot $name: over 5 MB." warning; continue; }
+              sha=$(sha256_of "$f" | cut -d' ' -f1)
+              read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.screenshot.$name.$sha")"
+              code=$(curl -sS --retry 2 -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/ai/runner/runs/$RH_RUN/screenshots?dispatch=$RH_DISPATCH&name=$name" \
+                -H 'Content-Type: application/octet-stream' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
+                -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$f" || echo 000)
+              [ "${code:0:1}" = "2" ] && sent=$((sent + 1))
+            done < <(find "$SHOTS_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) | sort | head -40)
+            rm -rf "$SHOTS_DIR"
+            [ "$sent" -eq 0 ] || log "Added $sent screenshot(s) of the app to the run."
+            return 0
+          }
+
+          # The agent's helpers, on its PATH: rh-verify runs the repository's checks in one call and rh-capture screenshots many pages
+          # in one call. Each saves the model calls (and re-reads of the conversation) that the same work step by step would take.
+          write_tools() {
+            mkdir -p "$TOOLS"
+            cat > "$TOOLS/rh-verify" <<'RH_VERIFY_END'
+          #!/usr/bin/env bash
+          # rh-verify: runs the repository's own checks in one call and prints a short summary, so the agent doesn't spend a model
+          # call (and a re-read of its conversation) on each tool. Full output goes to log files; failures show their last lines.
+          # Usage: rh-verify [--build] [--no-tests] [DIR]   (--build adds the production build; DIR for a project in a subfolder)
+          set -uo pipefail
+
+          build="" tests=1 dir="."
+          for arg in "$@"; do
+            case "$arg" in
+              --build) build=1 ;;
+              --no-tests) tests="" ;;
+              -h|--help) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+              *) dir="$arg" ;;
+            esac
+          done
+          cd "$dir" || { echo "rh-verify: no folder $dir"; exit 2; }
+
+          logs="${RH_WORK:-/tmp}/verify"
+          mkdir -p "$logs"
+          failed=0 ran=0
+          export CI=1 NO_COLOR=1 FORCE_COLOR=0 npm_config_fund=false npm_config_audit=false npm_config_progress=false npm_config_loglevel=error
+
+          # At most 15 minutes a check (a Mac has no timeout command).
+          limited() { if command -v timeout >/dev/null 2>&1; then timeout 900 "$@"; else perl -e 'alarm shift; exec @ARGV' 900 "$@"; fi; }
+
+          step() {
+            local name=$1 cmd=$2 started=$SECONDS
+            ran=$((ran + 1))
+            if limited bash -c "$cmd" > "$logs/$name.log" 2>&1; then
+              echo "OK    $name ($((SECONDS - started)) s)"
+            else
+              failed=1
+              echo "FAIL  $name ($((SECONDS - started)) s). Last lines of $logs/$name.log:"
+              grep -v '^[[:space:]]*$' "$logs/$name.log" | tail -40 | cut -c1-300 | sed 's/^/      /'
+            fi
+          }
+
+          # Files changed on this branch and not yet committed: lint only those, so old problems elsewhere don't drown the new ones.
+          changed() {
+            { git diff --name-only --diff-filter=ACMR "origin/${RH_BASE:-HEAD}...HEAD" 2>/dev/null
+              git diff --name-only --diff-filter=ACMR HEAD 2>/dev/null
+              git ls-files --others --exclude-standard 2>/dev/null; } | sort -u | grep -E "$1" | while read -r f; do [ -f "$f" ] && echo "$f"; done
+          }
+
+          script_of() { node -e 'const s=(require("./package.json").scripts||{})[process.argv[1]]||""; process.stdout.write(s)' "$1" 2>/dev/null; }
+
+          if [ -f package.json ]; then
+            pm=npm
+            [ -f yarn.lock ] && pm=yarn
+            [ -f pnpm-lock.yaml ] && pm=pnpm
+            if [ ! -d node_modules ]; then
+              case "$pm" in
+                yarn) step install "yarn install --frozen-lockfile --silent || yarn install --silent" ;;
+                pnpm) step install "pnpm install --frozen-lockfile --silent || pnpm install --silent" ;;
+                *) step install "npm ci --no-audit --no-fund || npm install --no-audit --no-fund" ;;
+              esac
+            fi
+            files=$(changed '\.(js|jsx|ts|tsx|mjs|cjs|vue)$' | tr '\n' ' ')
+            if [ -x node_modules/.bin/eslint ] && ls eslint.config.* .eslintrc* >/dev/null 2>&1; then
+              if [ -n "$files" ]; then step lint "node_modules/.bin/eslint $files"; else echo "SKIP  lint (no changed script files)"; fi
+            elif [ -n "$(script_of lint)" ]; then
+              step lint "$pm run lint"
+            fi
+            if [ -n "$(script_of typecheck)" ]; then step types "$pm run typecheck"
+            elif [ -n "$(script_of type-check)" ]; then step types "$pm run type-check"
+            elif [ -f tsconfig.json ] && [ -x node_modules/.bin/tsc ]; then
+              # A tsconfig.json that only lists other configs (references) checks nothing itself: check each listed config.
+              refs=$(grep -o '"path"[[:space:]]*:[[:space:]]*"[^"]*"' tsconfig.json | sed 's/.*"\([^"]*\)"$/\1/')
+              cmd=""
+              for ref in $refs; do
+                [ -d "$ref" ] && ref="$ref/tsconfig.json"
+                [ -f "$ref" ] && cmd="${cmd:+$cmd && }node_modules/.bin/tsc --noEmit -p $ref"
+              done
+              step types "${cmd:-node_modules/.bin/tsc --noEmit -p tsconfig.json}"
+            fi
+            test_script=$(script_of test)
+            if [ -n "$tests" ] && [ -n "$test_script" ] && ! grep -q 'no test specified' <<<"$test_script"; then
+              step tests "$pm test"
+            fi
+            if [ -n "$build" ] && [ -n "$(script_of build)" ]; then step build "$pm run build"; fi
+          fi
+
+          if [ -n "$(find . -maxdepth 3 \( -name '*.sln' -o -name '*.slnx' -o -name '*.csproj' \) -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+            step compile "dotnet build -nologo -v q -clp:ErrorsOnly"
+            if [ -n "$tests" ] && [ -n "$(find . -maxdepth 4 -name '*Test*.csproj' -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
+              step tests-dotnet "dotnet test --no-build -nologo -v q"
+            fi
+          fi
+
+          # A Flutter app (a phone app's code): its analyzer and tests.
+          if [ -f pubspec.yaml ]; then
+            if command -v flutter >/dev/null 2>&1; then
+              step packages "flutter pub get"
+              step analyze "flutter analyze --no-fatal-infos"
+              if [ -n "$tests" ] && [ -d test ]; then step tests-flutter "flutter test"; fi
+            else
+              echo "SKIP  flutter (the Flutter SDK is not on this machine; install it first, for example: git clone --depth 1 -b stable https://github.com/flutter/flutter.git ~/flutter)"
+            fi
+          fi
+
+          if [ "$ran" -eq 0 ]; then
+            echo "rh-verify found no checks to run here (no package.json scripts, eslint, TypeScript, .NET or Flutter project)."
+          fi
+          exit "$failed"
+          RH_VERIFY_END
+            cat > "$TOOLS/capture.mjs" <<'RH_CAPTURE_END'
+          // rh-capture: opens pages of the app in a real browser in one go and saves screenshots plus a short report, so the agent
+          // looks at the result instead of driving the browser step by step. Settings live in the preview kit (capture.json) and are
+          // reused by the next run. Uses the Playwright that the browser tool (@playwright/mcp) installed, so no second browser download.
+          // A phone app opens the same way on the iPhone simulator or the Android emulator (plan 1.33, "Phone apps" below), and a game
+          // made with an engine takes its own pictures through its picture mode (plan 1.34, "Games" below).
+          // Kept free of the two-brace and dollar-paren sequences: the runner file embeds this script in GitHub and Azure pipeline YAML.
+          import { createRequire } from 'node:module';
+          import { execFile, spawn } from 'node:child_process';
+          import fs from 'node:fs';
+          import os from 'node:os';
+          import path from 'node:path';
+
+          const SIZES = {
+            desktop: { viewport: { width: 1440, height: 900 } },
+            phone: { viewport: { width: 390, height: 844 }, isMobile: true, hasTouch: true },
+            tablet: { viewport: { width: 820, height: 1180 }, isMobile: true, hasTouch: true },
+          };
+          const KIT = process.env.RH_KIT || '.releasehub-context/preview';
+          const OUT = process.env.RH_SHOTS || '.releasehub-context/screenshots';
+          const HELP = `Usage: rh-capture --pages "NAME=/route,NAME2=/route2" [--phase before|after] [--sizes desktop,phone] [--locales default,ar] [--full]
+                 rh-capture --check     start the app and sign in, without screenshots
+
+          Screenshots go to ${OUT} as PHASE-NAME[-LOCALE]-SIZE.jpeg, with a report in report-PHASE.md.
+          Settings: ${path.join(KIT, 'capture.json')}, for example:
+          {
+            "baseUrl": "http://localhost:5173",
+            "start": "npm ci --no-audit --no-fund && npx vite --port 5173 --mode staging",
+            "cwd": ".",
+            "ready": "http://localhost:5173/",
+            "login": { "url": "/login", "steps": [
+              { "fill": "input[name=phone]", "value": "$RH_PREVIEW_USER" },
+              { "fill": "input[type=password]", "value": "$RH_PREVIEW_PASSWORD" },
+              { "click": "button[type=submit]" },
+              { "waitForUrl": "**/home**" } ] },
+            "localStorage": { "theme": "light" },
+            "locales": { "ar": { "localStorage": { "lang": "ar" } } },
+            "mocks": "mocks.json",
+            "readOnly": true,
+            "allowWrites": ["**/api/verify-password"]
+          }
+          "start" runs only when nothing answers at "ready", on a fresh machine: include installing the dependencies.
+          Login steps: fill + value, click, press, waitForUrl, waitFor (a selector), wait (milliseconds), evaluate (JavaScript; env holds the values).
+          "$RH_PREVIEW_USER" and "$RH_PREVIEW_PASSWORD" are replaced with the test account; never print them.
+          mocks.json: [{ "url": "**/api/stats**", "method": "GET", "status": 200, "json": { } }], served instead of the real API.
+          readOnly answers every request that would change data (except allowWrites) with an empty success, so pages can't write.
+          A game drawn on a canvas (most of the page) is checked as a game: rh-capture waits for it to draw ("gameWait" milliseconds
+          more, 1000) and says when its screen is one colour; reach its screens by address (/?scene=shop) or a hook the game reads in
+          development builds.`;
+
+          const PHONE_HELP = `Phone apps: an iPhone app on a Mac with Xcode, an Android app in the Android emulator.
+                 rh-capture --platform phone --pages "home=/,tree=/tree,profile=flows/profile.yaml" [--phase before|after] [--sizes phone,tablet] [--locales default,ar]
+                 rh-capture --platform phone --check   start the phone, build, install and open the app, and sign in
+                 rh-capture --phones                   the phone apps here, and what this machine can open
+          --platform ios or android picks one; phone takes the first this machine can open (the iPhone first). --no-build skips "build".
+          It starts the phone when none is running (the runner stops it at the end), builds and installs the app, then opens each
+          screen: the app as it opens (/ or nothing), a link into the app (example://tree, or /tree with "linkBase"), or a Maestro flow
+          (a .yaml file in ${KIT}) that taps to the screen. Start a flow with its appId line and no launchApp: rh-capture opens the app
+          in the right language first. Pictures: PHASE-NAME[-LOCALE]-SIZE.jpeg (iPhone) or .png (Android), sizes phone and tablet.
+          A first build takes several minutes: give the command a long time limit (up to 30 minutes).
+          Settings in capture.json (the web's settings may sit next to them):
+          "phone": {
+            "ios": { "build": "flutter build ios --simulator --debug", "app": "build/ios/iphonesimulator/Runner.app", "id": "com.example.app" },
+            "android": { "build": "flutter build apk --debug", "app": "build/app/outputs/flutter-apk/app-debug.apk", "id": "com.example.app" },
+            "linkBase": "example://app",
+            "signIn": "flows/sign-in.yaml",
+            "locales": { "ar": "ar_SA" }
+          }
+          Native apps: xcodebuild -scheme NAME -sdk iphonesimulator -configuration Debug -derivedDataPath build/rh build (app:
+          build/rh/Build/Products/Debug-iphonesimulator/*.app, the newest match); ./gradlew assembleDebug (app:
+          app/build/outputs/apk/debug/app-debug.apk). React Native's Metro or a local API: "start" and "ready" as for the web.
+          Per platform, "devices": { "phone": "iPhone 16", "tablet": "iPad (A16)" } names the simulators or emulators (default: an
+          iPhone and an iPad; the running Android device or the first emulator, else a new one); "wait" the milliseconds a screen gets
+          to settle (2500).
+          Sign-in flow: write the test account as \${RH_PREVIEW_USER} and \${RH_PREVIEW_PASSWORD}; rh-capture fills them in. Maestro
+          needs Java 17 (install: curl -fsSL "https://get.maestro.mobile.dev" | bash).`;
+
+          const GAME_HELP = `Games made with an engine (Godot, Unity): the game takes its own pictures through a picture mode.
+                 rh-capture --platform game --pages "menu=main_menu,shop=shop" [--phase after] [--sizes desktop,phone] [--locales default,ar]
+                 rh-capture --platform game --check   build (when set) and take one picture
+                 rh-capture --games                   what this machine has (the engines, a screen)
+          For each screen, size and language rh-capture runs the game's "shot" command, which opens the screen, waits for it to draw,
+          saves the picture and quits. In it {screen}, {file}, {locale} (the language, or default), {width}, {height} and {size} are
+          filled in; the same values are in RH_SCREEN, RH_SHOT, RH_LOCALE, RH_WIDTH and RH_HEIGHT ("$RH_SHOT" when a path may hold
+          spaces). On Linux without a display it runs under a virtual screen (xvfb-run). Pictures: PHASE-NAME[-LOCALE]-SIZE.png.
+          Settings in capture.json:
+          "game": {
+            "build": "optional, before the pictures (a game exported for this machine)",
+            "shot": "godot --path . --rendering-driver opengl3 --resolution {width}x{height} -- --rh-screen={screen} --rh-shot={file} --rh-locale={locale}",
+            "sizes": { "desktop": "1920x1080", "phone": "1170x2532", "tablet": "2048x2732" },
+            "check": "main_menu"
+          }
+          Godot: download the version project.godot names (config/features) from https://github.com/godotengine/godot/releases when it
+          isn't on the machine. The picture mode, as an autoload (Project Settings, Autoload), rh_shot.gd (its {screen} is a scene
+          in res://screens/ here: point it at the game's own scenes):
+          extends Node
+          func _ready():
+          	var a := {}
+          	for arg in OS.get_cmdline_user_args():
+          		if arg.begins_with("--rh-"):
+          			var kv := arg.substr(5).split("=", true, 1)
+          			a[kv[0]] = kv[1] if kv.size() > 1 else ""
+          	if not a.has("shot"):
+          		return
+          	if a.get("locale", "default") != "default":
+          		TranslationServer.set_locale(a["locale"])
+          	if a.get("screen", "") != "":
+          		get_tree().change_scene_to_file("res://screens/%s.tscn" % a["screen"])
+          	for i in 30:
+          		await get_tree().process_frame
+          	await RenderingServer.frame_post_draw
+          	get_viewport().get_texture().get_image().save_png(a["shot"])
+          	get_tree().quit()
+          Unity (needs Unity and its licence on the machine; build a player, then "shot": "Builds/Game.x86_64 -screen-width {width}
+          -screen-height {height} -screen-fullscreen 0 -rhScreen {screen} -rhShot {file} -rhLocale {locale}"), RhShot.cs:
+          using System.Collections;
+          using UnityEngine;
+          using UnityEngine.SceneManagement;
+          public class RhShot : MonoBehaviour
+          {
+              static string Arg(string name)
+              {
+                  var args = System.Environment.GetCommandLineArgs();
+                  int i = System.Array.IndexOf(args, name);
+                  return i >= 0 && i + 1 < args.Length ? args[i + 1] : null;
+              }
+              [RuntimeInitializeOnLoadMethod]
+              static void Begin()
+              {
+                  if (Arg("-rhShot") != null) DontDestroyOnLoad(new GameObject("RhShot").AddComponent<RhShot>());
+              }
+              IEnumerator Start()
+              {
+                  var screen = Arg("-rhScreen");
+                  if (!string.IsNullOrEmpty(screen)) yield return SceneManager.LoadSceneAsync(screen);
+                  for (int i = 0; i < 30; i++) yield return null;
+                  yield return new WaitForEndOfFrame();
+                  ScreenCapture.CaptureScreenshot(Arg("-rhShot"));
+                  yield return null;
+                  yield return null;
+                  Application.Quit();
+              }
+          }
+          Keep the picture mode out of release builds when the game has a way to (a debug feature, a define).`;
+
+          function parseArgs(argv) {
+            const opt = { phase: 'shot', pages: [], sizes: null, locales: null, full: false, check: false };
+            for (let i = 0; i < argv.length; i++) {
+              const a = argv[i];
+              const value = () => argv[++i] ?? '';
+              const list = () => value().split(',').map((s) => s.trim()).filter(Boolean);
+              if (a === '--phase') opt.phase = value().replace(/[^A-Za-z0-9_-]/g, '') || 'shot';
+              else if (a === '--pages' || a === '--page') opt.pages.push(...list());
+              else if (a === '--sizes') opt.sizes = list();
+              else if (a === '--locales') opt.locales = list();
+              else if (a === '--full') opt.full = true;
+              else if (a === '--check') opt.check = true;
+              else if (a === '--platform') opt.platform = value().toLowerCase();
+              else if (a === '--phones') opt.phones = true;
+              else if (a === '--games') opt.games = true;
+              else if (a === '--stop') opt.stop = true;
+              else if (a === '--no-build') opt.noBuild = true;
+              else if (a === '--config') opt.config = value();
+              else if (a === '--help' || a === '-h') opt.help = true;
+              else throw new Error(`Unknown option ${a}. Run rh-capture --help.`);
+            }
+            if (opt.platform && !['web', 'phone', 'ios', 'android', 'game'].includes(opt.platform)) throw new Error(`Unknown platform ${opt.platform}: web, phone, ios, android or game.`);
+            return opt;
+          }
+
+          function loadPlaywright() {
+            const roots = [process.env.RH_NPM_ROOT, path.join(os.homedir(), '.npm-global/lib/node_modules'), '/usr/local/lib/node_modules', '/usr/lib/node_modules'];
+            for (const root of roots.filter(Boolean)) {
+              for (const from of ['@playwright/mcp/package.json', 'playwright/package.json']) {
+                try {
+                  return createRequire(path.join(root, from))('playwright');
+                } catch {
+                  // try the next place
+                }
+              }
+            }
+            return createRequire(path.join(process.cwd(), 'package.json'))('playwright');
+          }
+
+          function readSecrets() {
+            const values = {};
+            const file = process.env.RH_PREVIEW_ENV;
+            if (file && fs.existsSync(file)) {
+              for (const line of fs.readFileSync(file, 'utf8').split('\n')) {
+                const m = /^([A-Z][A-Z0-9_]*)=(.*)$/.exec(line);
+                if (m) values[m[1]] = m[2];
+              }
+            }
+            for (const [k, v] of Object.entries(process.env)) {
+              if (k.startsWith('RH_PREVIEW_') && k !== 'RH_PREVIEW_ENV' && !(k in values)) values[k] = v;
+            }
+            return values;
+          }
+
+          // "$NAME" placeholders become the test account's values; anything else stays as written.
+          function fill(value, secrets) {
+            return typeof value === 'string' ? value.replace(/[$]([A-Z][A-Z0-9_]*)/g, (m, k) => (k in secrets ? secrets[k] : m)) : value;
+          }
+
+          function globToRegex(glob) {
+            let re = '';
+            for (let i = 0; i < glob.length; i++) {
+              const c = glob[i];
+              if (c === '*') {
+                if (glob[i + 1] === '*') {
+                  re += '.*';
+                  i++;
+                } else re += '[^/]*';
+              } else if (c === '?') re += '.';
+              else re += c.replace(/[.+^|\\/[\]{}()]/g, '\\' + '$&');
+            }
+            return new RegExp('^' + re + '$');
+          }
+
+          const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+          async function answers(url) {
+            try {
+              const res = await fetch(url, { signal: AbortSignal.timeout(4000), redirect: 'manual' });
+              return res.status < 500;
+            } catch {
+              return false;
+            }
+          }
+
+          async function ensureApp(cfg) {
+            const ready = cfg.ready || cfg.baseUrl;
+            if (await answers(ready)) return `The app answers at ${cfg.baseUrl}.`;
+            if (!cfg.start) throw new Error(`Nothing answers at ${ready}, and capture.json has no "start" command.`);
+            const log = process.env.RH_APP_LOG || path.join(os.tmpdir(), 'rh-app.log');
+            const fd = fs.openSync(log, 'w');
+            const child = spawn('bash', ['-c', cfg.start], {
+              cwd: cfg.cwd ? path.resolve(cfg.cwd) : process.cwd(),
+              detached: true,
+              stdio: ['ignore', fd, fd],
+              env: { ...process.env, BROWSER: 'none', CI: 'true' },
+            });
+            let exited = false;
+            child.on('exit', () => {
+              exited = true;
+            });
+            child.unref();
+            if (process.env.RH_APP_PIDS) fs.appendFileSync(process.env.RH_APP_PIDS, `${child.pid}\n`);
+            const started = Date.now();
+            const limit = (Number(cfg.readyTimeout) || 180) * 1000;
+            while (Date.now() - started < limit && !exited) {
+              if (await answers(ready)) return `Started the app (${Math.round((Date.now() - started) / 1000)} s); it answers at ${cfg.baseUrl}. Its output is in ${log}.`;
+              await sleep(1000);
+            }
+            const tail = fs.readFileSync(log, 'utf8').split('\n').filter((l) => l.trim()).slice(-25).join('\n');
+            throw new Error(`The app ${exited ? 'stopped' : `didn't answer at ${ready} within ${limit / 1000} s`}. Last lines of ${log}:\n${tail}`);
+          }
+
+          function readMocks(cfg) {
+            if (!cfg.mocks) return [];
+            if (Array.isArray(cfg.mocks)) return cfg.mocks;
+            return JSON.parse(fs.readFileSync(path.resolve(KIT, cfg.mocks), 'utf8'));
+          }
+
+          async function prepareContext(context, cfg, secrets, locale) {
+            if (cfg.readOnly) {
+              const allow = (cfg.allowWrites || []).map(globToRegex);
+              await context.route('**/*', async (route) => {
+                const req = route.request();
+                if (['GET', 'HEAD', 'OPTIONS'].includes(req.method()) || allow.some((re) => re.test(req.url()))) return route.fallback();
+                return route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
+              });
+            }
+            // Registered after the read-only rule, so a mock wins over it.
+            for (const m of readMocks(cfg)) {
+              await context.route(m.url, async (route) => {
+                if (m.method && route.request().method() !== String(m.method).toUpperCase()) return route.fallback();
+                let body = m.body ?? '';
+                if (m.json !== undefined) body = JSON.stringify(m.json);
+                else if (m.bodyFile) body = fs.readFileSync(path.resolve(KIT, m.bodyFile));
+                return route.fulfill({ status: m.status || 200, contentType: m.contentType || (m.json !== undefined ? 'application/json' : 'text/plain'), body });
+              });
+            }
+            const storage = { ...(cfg.localStorage || {}), ...((locale && cfg.locales && cfg.locales[locale] && cfg.locales[locale].localStorage) || {}) };
+            const pairs = Object.entries(storage).map(([k, v]) => [k, typeof v === 'string' ? fill(v, secrets) : JSON.stringify(v)]);
+            if (pairs.length) {
+              await context.addInitScript((entries) => {
+                for (const [k, v] of entries) {
+                  try {
+                    localStorage.setItem(k, v);
+                  } catch {
+                    // storage blocked on this origin
+                  }
+                }
+              }, pairs);
+            }
+          }
+
+          function pageUrl(cfg, route, locale) {
+            const url = new URL(route || '/', cfg.baseUrl);
+            const query = locale && cfg.locales && cfg.locales[locale] && cfg.locales[locale].query;
+            if (query) for (const [k, v] of new URLSearchParams(query)) url.searchParams.set(k, v);
+            return url.toString();
+          }
+
+          async function signIn(browser, cfg, secrets, statePath) {
+            const login = cfg.login;
+            if (!login) return { note: 'no sign-in set up' };
+            const needsAccount = JSON.stringify(login).includes('$RH_PREVIEW_');
+            if (needsAccount && !secrets.RH_PREVIEW_USER) return { note: 'not signed in: the test account (RH_PREVIEW_USER, RH_PREVIEW_PASSWORD) is not set', failed: true };
+            const context = await browser.newContext({ ...SIZES.desktop, ignoreHTTPSErrors: true });
+            await prepareContext(context, cfg, secrets, null);
+            const page = await context.newPage();
+            let step = 'opening the sign-in page';
+            try {
+              await page.goto(pageUrl(cfg, login.url || '/', null), { waitUntil: 'domcontentloaded', timeout: 45000 });
+              for (const s of login.steps || []) {
+                step = JSON.stringify(Object.fromEntries(Object.entries(s).filter(([k]) => k !== 'value')));
+                if (s.fill) await page.fill(s.fill, String(fill(s.value ?? '', secrets)), { timeout: 20000 });
+                else if (s.click) await page.click(s.click, { timeout: 20000 });
+                else if (s.press) await page.keyboard.press(s.press);
+                else if (s.waitForUrl) await page.waitForURL(s.waitForUrl, { timeout: 20000 });
+                else if (s.waitFor) await page.waitForSelector(s.waitFor, { timeout: 20000 });
+                else if (s.wait) await page.waitForTimeout(Number(s.wait));
+                else if (s.evaluate) await page.evaluate(`((env) => { ${s.evaluate} })(${JSON.stringify(secrets)})`);
+              }
+              await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+              await context.storageState({ path: statePath });
+              return { state: statePath, note: `signed in (ended on ${new URL(page.url()).pathname})` };
+            } catch (err) {
+              const shot = path.join(OUT, 'page-sign-in-failed.jpeg');
+              await page.screenshot({ path: shot, type: 'jpeg', quality: 70 }).catch(() => {});
+              return { note: `sign-in failed at ${step}: ${String(err.message || err).split('\n')[0]} (screenshot: ${shot})`, failed: true };
+            } finally {
+              await context.close();
+            }
+          }
+
+          // Runs inside the page: what an eye checks first, as text.
+          function inspect() {
+            // The screen's width, not the window's: a phone zooms out to fit a page that is too wide, which hides the overflow.
+            const vw = (window.screen && window.screen.width) || window.innerWidth;
+            const doc = document.documentElement;
+            const name = (el) => {
+              let s = el.tagName.toLowerCase();
+              if (el.id) return `${s}#${el.id}`;
+              const cls = [...el.classList].filter((c) => c.length < 40).slice(0, 2);
+              if (cls.length) s += '.' + cls.join('.');
+              return s;
+            };
+            const overflow = Math.max(doc.scrollWidth, document.body ? document.body.scrollWidth : 0, window.innerWidth) - vw;
+            const wide = [];
+            const reported = [];
+            if (overflow > 1) {
+              for (const el of document.querySelectorAll('body *')) {
+                if (wide.length >= 4) break;
+                if (reported.some((r) => r.contains(el))) continue;
+                const r = el.getBoundingClientRect();
+                if (!r.width || !r.height || (r.right <= vw + 1 && r.left >= -1)) continue;
+                let p = el.parentElement;
+                let scrolls = false;
+                while (p && p !== document.body) {
+                  if (getComputedStyle(p).overflowX !== 'visible') {
+                    scrolls = true;
+                    break;
+                  }
+                  p = p.parentElement;
+                }
+                if (scrolls) continue;
+                reported.push(el);
+                wide.push(`${name(el)} ${Math.round(Math.max(r.right - vw, -r.left))} px`);
+              }
+            }
+            const clipped = [];
+            for (const el of document.querySelectorAll('body *')) {
+              if (clipped.length >= 4) break;
+              const text = [...el.childNodes].filter((n) => n.nodeType === 3).map((n) => n.textContent.trim()).join(' ').trim();
+              if (!text) continue;
+              const cs = getComputedStyle(el);
+              if (el.scrollWidth > el.clientWidth + 1 && (cs.overflowX === 'hidden' || cs.overflowX === 'clip') && cs.textOverflow !== 'ellipsis') {
+                clipped.push(`${name(el)} "${text.slice(0, 40)}"`);
+              }
+            }
+            const brokenImages = [...document.images].filter((i) => i.complete && i.naturalWidth === 0 && i.currentSrc).map((i) => i.currentSrc.split('/').pop().slice(0, 60)).slice(0, 3);
+            return {
+              overflow: Math.max(0, Math.round(overflow)),
+              wide,
+              clipped,
+              brokenImages,
+              direction: getComputedStyle(document.body || doc).direction,
+              textLength: document.body ? document.body.innerText.trim().length : 0,
+              // A game drawn on a canvas (plan 1.34): how much of the screen its biggest canvas covers.
+              canvas: Math.max(0, ...[...document.querySelectorAll('canvas')].map((c) => {
+                const r = c.getBoundingClientRect();
+                return (Math.min(r.right, window.innerWidth) - Math.max(r.left, 0)) * (Math.min(r.bottom, window.innerHeight) - Math.max(r.top, 0));
+              }).filter((a) => a > 0)) / (window.innerWidth * window.innerHeight),
+            };
+          }
+
+          async function visit(context, cfg, job, opt, loginPath) {
+            const page = await context.newPage();
+            const consoleErrors = [];
+            const failed = [];
+            page.on('console', (m) => {
+              if (m.type() === 'error' && consoleErrors.length < 50) consoleErrors.push(m.text().replace(/\s+/g, ' ').slice(0, 160));
+            });
+            page.on('pageerror', (e) => consoleErrors.push(`uncaught: ${String(e.message || e).split('\n')[0].slice(0, 150)}`));
+            page.on('response', (r) => {
+              if (r.status() >= 400 && failed.length < 50) failed.push(`${r.request().method()} ${r.status()} ${new URL(r.url()).pathname}`);
+            });
+            page.on('requestfailed', (r) => {
+              const why = (r.failure() && r.failure().errorText) || 'failed';
+              if (!why.includes('ERR_ABORTED') && failed.length < 50) failed.push(`${r.method()} ${why} ${new URL(r.url()).pathname}`);
+            });
+            const started = Date.now();
+            let status = null;
+            let error = null;
+            try {
+              const res = await page.goto(pageUrl(cfg, job.route, job.locale === 'default' ? null : job.locale), { waitUntil: 'load', timeout: 45000 });
+              status = res ? res.status() : null;
+              await page.waitForLoadState('networkidle', { timeout: 10000 }).catch(() => {});
+              await page.waitForTimeout(400);
+            } catch (err) {
+              error = String(err.message || err).split('\n')[0];
+            }
+            const facts = error ? null : await page.evaluate(inspect).catch(() => null);
+            // A game: its frames drawn first (30 of them, then a moment more).
+            const game = !!facts && facts.canvas >= 0.5;
+            if (game) {
+              await page.evaluate(() => new Promise((done) => {
+                let n = 0;
+                const tick = () => (++n >= 30 ? done() : requestAnimationFrame(tick));
+                requestAnimationFrame(tick);
+                setTimeout(done, 5000);
+              })).catch(() => {});
+              await page.waitForTimeout(Number(cfg.gameWait) || 1000);
+            }
+            const seconds = ((Date.now() - started) / 1000).toFixed(1);
+            const file = `${opt.phase}-${job.name}${job.locale === 'default' ? '' : `-${job.locale}`}-${job.size}.jpeg`;
+            let picture = null;
+            if (!error) picture = await page.screenshot({ path: path.join(OUT, file), type: 'jpeg', quality: 70, fullPage: opt.full }).catch((e) => ((error = `screenshot failed: ${e.message}`), null));
+            const finalPath = (() => {
+              try {
+                return new URL(page.url()).pathname;
+              } catch {
+                return '';
+              }
+            })();
+            await page.close();
+            const issues = [];
+            if (error) issues.push(`didn't load: ${error}`);
+            if (status && status >= 400) issues.push(`the page answered ${status}`);
+            if (loginPath && finalPath === loginPath && job.route !== loginPath) issues.push('landed on the sign-in page (not signed in)');
+            if (facts) {
+              if (facts.overflow > 1) issues.push(`${facts.overflow} px wider than the screen${facts.wide.length ? ` (${facts.wide.join(', ')})` : ''}`);
+              if (facts.clipped.length) issues.push(`cut-off text: ${facts.clipped.join('; ')}`);
+              if (facts.brokenImages.length) issues.push(`broken images: ${facts.brokenImages.join(', ')}`);
+              if (job.locale !== 'default' && /^(ar|he|fa|ur)/.test(job.locale) && facts.direction !== 'rtl') issues.push('not right to left');
+              if (game && picture && looksEmpty(picture)) issues.push('the game screen is almost one colour (black or still loading; WebGL may not have started)');
+              else if (!game && facts.textLength < 30) issues.push('almost no text on the page (empty state or not loaded)');
+            }
+            if (consoleErrors.length) issues.push(`${consoleErrors.length} console error(s), first: ${consoleErrors[0]}`);
+            const shownFailed = failed.filter((f) => !f.endsWith('/favicon.ico'));
+            if (shownFailed.length) issues.push(`${shownFailed.length} failed request(s): ${[...new Set(shownFailed)].slice(0, 3).join(', ')}`);
+            return { ...job, file: error ? null : file, seconds, issues };
+          }
+
+          async function pool(items, size, fn) {
+            const results = new Array(items.length);
+            let next = 0;
+            await Promise.all(
+              Array.from({ length: Math.min(size, items.length) }, async () => {
+                while (next < items.length) {
+                  const i = next++;
+                  results[i] = await fn(items[i]);
+                }
+              }),
+            );
+            return results;
+          }
+
+          // The report both kinds of pictures end with: one line per picture, also kept as report-PHASE.md.
+          function report(results, opt, began, on) {
+            const lines = results.map((r) => {
+              const where = `${r.name} · ${r.size}${r.locale === 'default' ? '' : ` · ${r.locale}`}`;
+              const what = r.issues.length ? r.issues.join('; ') : 'no automatic findings';
+              return `- ${where}: ${what}.${r.file ? ` ${r.file}` : ''} (${r.seconds} s)`;
+            });
+            const header = `${results.filter((r) => r.file).length} screenshot(s)${on ? ` ${on}` : ''} in ${OUT} in ${Math.round((Date.now() - began) / 1000)} s. Open only the ones you need.`;
+            fs.writeFileSync(path.join(OUT, `report-${opt.phase}.md`), `${header}\n\n${lines.join('\n')}\n`);
+            console.log(header);
+            console.log(lines.join('\n'));
+          }
+
+          function namedPages(opt) {
+            return opt.pages.map((p) => {
+              const at = p.indexOf('=');
+              const name = (at > 0 ? p.slice(0, at) : p).replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 40);
+              return { name, route: at > 0 ? p.slice(at + 1) : `/${p}` };
+            });
+          }
+
+          // ─── Phone apps (plan 1.33) ─────────────────────────────────────────────
+          // An iPhone app opens in the iPhone simulator (a Mac with Xcode), an Android app in the Android emulator. rh-capture starts
+          // the phone when none is running (rh-capture --stop, which the runner calls at the end, stops the ones it started), builds
+          // and installs the app, opens each screen by its link or a Maestro flow and saves pictures named like the web's.
+
+          const PHONE_SIZES = ['phone', 'tablet'];
+          const WORK_DIR = process.env.RH_WORK || os.tmpdir();
+          const PHONES_STARTED = process.env.RH_PHONES_STARTED || path.join(WORK_DIR, 'rh-phones-started.txt');
+          const BOOT_SECONDS = Number(process.env.RH_PHONE_BOOT_SECONDS) || 600;
+
+          /** Runs a program without a shell and never throws: its exit code (127 when it isn't there) and output. */
+          function run(file, args, { timeout = 60000, input, env, cwd, binary = false } = {}) {
+            return new Promise((resolve) => {
+              let child;
+              try {
+                child = execFile(file, args, {
+                  timeout,
+                  env: env || process.env,
+                  cwd,
+                  shell: process.platform === 'win32' && /\.(bat|cmd)$/i.test(file),
+                  encoding: binary ? 'buffer' : 'utf8',
+                  maxBuffer: 128 * 1024 * 1024,
+                  windowsHide: true,
+                }, (err, stdout, stderr) => {
+                  let code = 0;
+                  if (err) code = typeof err.code === 'number' ? err.code : err.code === 'ENOENT' ? 127 : 1;
+                  resolve({ code, stdout: binary ? stdout : String(stdout || ''), stderr: String(stderr || ''), timedOut: !!(err && err.killed) });
+                });
+              } catch (err) {
+                resolve({ code: 127, stdout: binary ? Buffer.alloc(0) : '', stderr: String(err.message || err), timedOut: false });
+                return;
+              }
+              if (input !== undefined) child.stdin.end(input);
+            });
+          }
+
+          const lastLines = (text, n = 1) => String(text || '').split('\n').map((l) => l.trim()).filter(Boolean).slice(-n).join(' ').slice(0, 300);
+          const tailOf = (file, n) => {
+            try {
+              return fs.readFileSync(file, 'utf8').split('\n').filter((l) => l.trim()).slice(-n).join('\n');
+            } catch {
+              return '';
+            }
+          };
+
+          /** A phone rh-capture started, for rh-capture --stop. */
+          function remember(line) {
+            try {
+              fs.appendFileSync(PHONES_STARTED, `${line}\n`);
+            } catch {
+              // Not stopped then: a hosted machine ends with its job anyway.
+            }
+          }
+
+          /** A picture's width and height from its PNG or JPEG header. */
+          function imageSize(buf) {
+            if (buf.length > 24 && buf.readUInt32BE(0) === 0x89504e47) return { w: buf.readUInt32BE(16), h: buf.readUInt32BE(20) };
+            if (buf.length > 4 && buf[0] === 0xff && buf[1] === 0xd8) {
+              let i = 2;
+              while (i + 9 < buf.length) {
+                if (buf[i] !== 0xff) {
+                  i++;
+                  continue;
+                }
+                const marker = buf[i + 1];
+                if (marker >= 0xc0 && marker <= 0xcf && ![0xc4, 0xc8, 0xcc].includes(marker)) return { h: buf.readUInt16BE(i + 5), w: buf.readUInt16BE(i + 7) };
+                i += 2 + buf.readUInt16BE(i + 2);
+              }
+            }
+            return null;
+          }
+
+          /** Whether a picture is almost one colour (it compresses to next to nothing): a blank, loading or splash screen. */
+          function looksEmpty(buf) {
+            const size = imageSize(buf);
+            if (!size || !size.w || !size.h) return false;
+            return buf.length / (size.w * size.h) < (buf[0] === 0x89 ? 0.02 : 0.03);
+          }
+
+          const compareVersions = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+
+          const iosDriver = {
+            key: 'ios',
+            label: 'iPhone',
+            ext: 'jpeg',
+            idName: 'bundle id',
+            /** The available iOS simulators, the newest iOS first. */
+            async simulators() {
+              const r = await run('xcrun', ['simctl', 'list', 'devices', 'available', '--json'], { timeout: 90000 });
+              if (r.code !== 0) return null;
+              let data;
+              try {
+                data = JSON.parse(r.stdout);
+              } catch {
+                return null;
+              }
+              const list = [];
+              for (const [runtime, devices] of Object.entries(data.devices || {})) {
+                const m = /SimRuntime\.iOS-(\d+)-(\d+)(?:-(\d+))?$/.exec(runtime);
+                if (!m) continue;
+                const version = [Number(m[1]), Number(m[2]), Number(m[3] || 0)];
+                for (const d of devices) {
+                  if (d.isAvailable === false) continue;
+                  list.push({ id: d.udid, name: d.name, os: `iOS ${m[1]}.${m[2]}${m[3] ? `.${m[3]}` : ''}`, version, booted: d.state === 'Booted' });
+                }
+              }
+              return list.sort((a, b) => compareVersions(b.version, a.version));
+            },
+            pick(list, size, wanted) {
+              const fits = list.filter((d) => (size === 'tablet' ? /^iPad/ : /^iPhone/).test(d.name));
+              if (wanted) return fits.find((d) => d.name.toLowerCase() === String(wanted).toLowerCase() || d.id === wanted) || null;
+              const plain = size === 'tablet' ? /^iPad( Air)?\b/ : /^iPhone \d+$/;
+              return fits.find((d) => d.booted) || fits.find((d) => plain.test(d.name)) || fits[0] || null;
+            },
+            async check() {
+              const list = await this.simulators();
+              if (!list) return { ok: false, why: "this machine isn't a Mac with Xcode, so it can't open iPhone apps" };
+              const phone = this.pick(list, 'phone');
+              if (!phone) return { ok: false, why: 'Xcode has no iPhone simulator here (Xcode, Settings, Components adds one)' };
+              return { ok: true, note: `${phone.name}, ${phone.os}` };
+            },
+            async device(size, s) {
+              const wanted = s.devices[size];
+              const dev = this.pick((await this.simulators()) || [], size, wanted);
+              if (!dev) throw new Error(wanted ? `there is no simulator named "${wanted}" here` : `there is no ${size === 'tablet' ? 'iPad' : 'iPhone'} simulator here`);
+              return { ...dev, label: `${dev.name} (${dev.os})` };
+            },
+            async start(dev) {
+              if (!dev.booted) {
+                const r = await run('xcrun', ['simctl', 'boot', dev.id], { timeout: 180000 });
+                if (r.code !== 0 && !/current state: Booted/i.test(r.stderr)) throw new Error(`the ${dev.name} simulator didn't start: ${lastLines(r.stderr)}`);
+                if (r.code === 0) remember(`ios ${dev.id}`);
+              }
+              const s = await run('xcrun', ['simctl', 'bootstatus', dev.id], { timeout: BOOT_SECONDS * 1000 });
+              if (s.code !== 0) throw new Error(`the ${dev.name} simulator didn't finish starting: ${lastLines(s.stderr || s.stdout)}`);
+              // Pictures as the stores show them: 9:41, full battery and signal, the light appearance.
+              await run('xcrun', ['simctl', 'status_bar', dev.id, 'override', '--time', '9:41', '--dataNetwork', 'wifi', '--wifiMode', 'active', '--wifiBars', '3',
+                '--cellularMode', 'active', '--cellularBars', '4', '--batteryState', 'charged', '--batteryLevel', '100']);
+              await run('xcrun', ['simctl', 'ui', dev.id, 'appearance', 'light']);
+            },
+            async install(dev, app, id) {
+              const r = await run('xcrun', ['simctl', 'install', dev.id, app], { timeout: 300000 });
+              if (r.code !== 0) throw new Error(`installing the app on ${dev.label} failed: ${lastLines(r.stderr)}`);
+              // Its permission questions would cover the screens.
+              await run('xcrun', ['simctl', 'privacy', dev.id, 'grant', 'all', id]);
+            },
+            async launch(dev, id, locale, region) {
+              const args = ['simctl', 'launch', '--terminate-running-process', dev.id, id];
+              if (locale !== 'default') args.push('-AppleLanguages', `(${locale})`, '-AppleLocale', region || locale.replace('-', '_'));
+              const r = await run('xcrun', args, { timeout: 120000 });
+              return { fatal: r.code === 0 ? null : `the app didn't open: ${lastLines(r.stderr)}`, notes: [] };
+            },
+            async open(dev, url) {
+              const r = await run('xcrun', ['simctl', 'openurl', dev.id, url], { timeout: 60000 });
+              return r.code === 0 ? null : `the link ${url} didn't open: ${lastLines(r.stderr)}`;
+            },
+            async shot(dev, file) {
+              const r = await run('xcrun', ['simctl', 'io', dev.id, 'screenshot', '--type=jpeg', file], { timeout: 60000 });
+              return r.code === 0 && fs.existsSync(file) ? null : `the screenshot failed: ${lastLines(r.stderr)}`;
+            },
+            async running(dev, id) {
+              const r = await run('xcrun', ['simctl', 'spawn', dev.id, 'launchctl', 'list'], { timeout: 30000 });
+              return r.code === 0 ? r.stdout.includes(`UIKitApplication:${id}`) : null;
+            },
+            async crash() {
+              return '';
+            },
+            async stop(id) {
+              await run('xcrun', ['simctl', 'shutdown', id], { timeout: 120000 });
+            },
+          };
+
+          /** The Android SDK: ANDROID_HOME, else where Android Studio puts it. */
+          function androidSdk() {
+            const home = os.homedir();
+            const places = [process.env.ANDROID_HOME, process.env.ANDROID_SDK_ROOT,
+              path.join(home, process.platform === 'darwin' ? 'Library/Android/sdk' : 'Android/Sdk'),
+              process.env.LOCALAPPDATA ? path.join(process.env.LOCALAPPDATA, 'Android', 'Sdk') : null];
+            return places.find((p) => p && fs.existsSync(p)) || null;
+          }
+
+          function inSdk(...parts) {
+            const sdk = androidSdk();
+            const file = sdk ? path.join(sdk, ...parts) : null;
+            return file && fs.existsSync(file) ? file : null;
+          }
+
+          const exe = (name) => (process.platform === 'win32' ? `${name}.exe` : name);
+          const adbPath = () => inSdk('platform-tools', exe('adb')) || 'adb';
+          const emulatorPath = () => inSdk('emulator', exe('emulator')) || 'emulator';
+          const adb = (serial, args, opts) => run(adbPath(), serial ? ['-s', serial, ...args] : args, opts);
+          /** A value for the device's shell (adb shell joins its words into one command line). */
+          const quoted = (value) => `'${String(value).split("'").join("'\\''")}'`;
+
+          /** sdkmanager or avdmanager: the newest command-line tools in the SDK, else on the PATH. */
+          function sdkTool(name) {
+            const file = process.platform === 'win32' ? `${name}.bat` : name;
+            const sdk = androidSdk();
+            if (sdk) {
+              const root = path.join(sdk, 'cmdline-tools');
+              let dirs = [];
+              try {
+                dirs = ['latest', ...fs.readdirSync(root).filter((d) => d !== 'latest').sort().reverse()];
+              } catch {
+                // no command-line tools in the SDK
+              }
+              for (const dir of dirs) {
+                const p = path.join(root, dir, 'bin', file);
+                if (fs.existsSync(p)) return p;
+              }
+            }
+            return file;
+          }
+
+          /** Whether the emulator can run here: Linux needs hardware virtualization (/dev/kvm); a Mac or Windows has its own. */
+          function virtualization() {
+            if (process.platform !== 'linux') return true;
+            try {
+              fs.accessSync('/dev/kvm', fs.constants.R_OK | fs.constants.W_OK);
+              return true;
+            } catch {
+              return false;
+            }
+          }
+
+          const NO_KVM = "the Android emulator needs hardware virtualization (/dev/kvm), which this machine doesn't have";
+
+          /** The Android devices adb sees (null: no adb here). */
+          async function androidDevices() {
+            const r = await adb(null, ['devices'], { timeout: 60000 });
+            if (r.code !== 0) return null;
+            return r.stdout.split('\n').map((l) => l.trim().split(/\s+/)).filter((p) => p.length >= 2 && p[1] === 'device').map((p) => p[0]);
+          }
+
+          /** The emulators made on this machine (null: no emulator here). */
+          async function avds() {
+            const r = await run(emulatorPath(), ['-list-avds'], { timeout: 60000 });
+            if (r.code !== 0) return null;
+            return r.stdout.split('\n').map((l) => l.trim()).filter((l) => /^[A-Za-z0-9._-]+$/.test(l));
+          }
+
+          /** The Android system images in the SDK for this machine's processor, the newest Android first. */
+          function systemImages() {
+            const root = inSdk('system-images');
+            if (!root) return [];
+            const abi = process.arch === 'arm64' ? 'arm64-v8a' : 'x86_64';
+            const tags = ['google_apis', 'default', 'google_apis_playstore'];
+            const found = [];
+            const list = (dir) => {
+              try {
+                return fs.readdirSync(dir);
+              } catch {
+                return [];
+              }
+            };
+            for (const api of list(root)) {
+              const level = Number((/^android-(\d+)$/.exec(api) || [])[1]);
+              if (!level) continue;
+              for (const tag of list(path.join(root, api))) {
+                if (tags.includes(tag) && fs.existsSync(path.join(root, api, tag, abi))) found.push({ level, rank: tags.indexOf(tag), pkg: `system-images;${api};${tag};${abi}` });
+              }
+            }
+            return found.sort((a, b) => b.level - a.level || a.rank - b.rank);
+          }
+
+          /** A new emulator for the size, from the newest system image here (downloaded first when there is none). */
+          async function createAvd(size) {
+            const name = size === 'tablet' ? 'rh-tablet' : 'rh-phone';
+            let images = systemImages();
+            if (!images.length) {
+              const pkg = `system-images;android-35;google_apis;${process.arch === 'arm64' ? 'arm64-v8a' : 'x86_64'}`;
+              console.log(`Downloading an Android system image for the emulator (${pkg}, about 1.5 GB); a machine that keeps its files does this once.`);
+              const r = await run(sdkTool('sdkmanager'), ['--install', pkg], { input: 'y\n'.repeat(40), timeout: 3600000 });
+              images = systemImages();
+              if (!images.length) throw new Error(`downloading the Android system image failed: ${lastLines(r.stderr || r.stdout)}`);
+            }
+            const profiles = size === 'tablet' ? ['pixel_tablet', 'Nexus 10', null] : ['pixel_7', 'pixel_6', null];
+            let said = '';
+            for (const profile of profiles) {
+              const r = await run(sdkTool('avdmanager'), ['create', 'avd', '-n', name, '-k', images[0].pkg, '--force', ...(profile ? ['-d', profile] : [])], { input: 'no\n', timeout: 300000 });
+              if (r.code === 0) {
+                console.log(`Made the ${name} emulator (Android API ${images[0].level}).`);
+                return name;
+              }
+              said = lastLines(r.stderr || r.stdout);
+            }
+            throw new Error(`making an Android emulator failed: ${said}`);
+          }
+
+          const androidDriver = {
+            key: 'android',
+            label: 'Android',
+            ext: 'png',
+            idName: 'package name',
+            async check() {
+              const devices = await androidDevices();
+              if (!devices) return { ok: false, why: "the Android SDK's adb isn't on this machine (Android Studio installs it)" };
+              if (devices.length) return { ok: true, note: `the running ${devices[0]}` };
+              const names = await avds();
+              if (!names) return { ok: false, why: "the Android emulator isn't installed here (Android Studio's SDK Manager adds it)" };
+              if (!virtualization()) return { ok: false, why: NO_KVM };
+              if (names.length) return { ok: true, note: `the ${names[0]} emulator` };
+              if (systemImages().length) return { ok: true, note: `a new emulator (Android API ${systemImages()[0].level})` };
+              const sdkmanager = await run(sdkTool('sdkmanager'), ['--version'], { timeout: 120000 });
+              if (sdkmanager.code !== 0) return { ok: false, why: "there's no Android emulator image here (Android Studio's Device Manager adds one)" };
+              return { ok: true, note: 'a new emulator, after downloading an Android system image (about 1.5 GB)' };
+            },
+            async device(size, s) {
+              const wanted = s.devices[size];
+              const devices = (await androidDevices()) || [];
+              if (wanted && devices.includes(wanted)) return { id: wanted, label: wanted, running: true };
+              if (!wanted && size === 'phone' && devices.length) {
+                const serial = devices.includes(process.env.ANDROID_SERIAL) ? process.env.ANDROID_SERIAL : devices[0];
+                const model = await adb(serial, ['shell', 'getprop', 'ro.product.model'], { timeout: 20000 });
+                return { id: serial, label: model.code === 0 && model.stdout.trim() ? `${model.stdout.trim()} (${serial})` : serial, running: true };
+              }
+              if (!virtualization()) throw new Error(NO_KVM);
+              const names = (await avds()) || [];
+              if (wanted && !names.includes(wanted)) throw new Error(`there is no emulator named "${wanted}" here (emulator -list-avds lists them)`);
+              const tablet = (n) => /tablet|tab\b/i.test(n);
+              const avd = wanted || names.find((n) => (size === 'tablet' ? tablet(n) : !tablet(n))) || (await createAvd(size));
+              // An emulator of that name may be running already.
+              for (const serial of devices.filter((d) => d.startsWith('emulator-'))) {
+                const r = await adb(serial, ['emu', 'avd', 'name'], { timeout: 20000 });
+                if (r.code === 0 && r.stdout.split('\n')[0].trim() === avd) return { id: serial, label: avd, running: true };
+              }
+              return { id: null, avd, label: avd, running: false };
+            },
+            async start(dev, s) {
+              if (!dev.running) {
+                const devices = (await androidDevices()) || [];
+                let port = 5580;
+                while (devices.includes(`emulator-${port}`)) port += 2;
+                const log = path.join(WORK_DIR, `rh-emulator-${dev.avd}.log`);
+                const fd = fs.openSync(log, 'w');
+                const child = spawn(emulatorPath(), ['-avd', dev.avd, '-port', String(port), '-no-window', '-no-audio', '-no-boot-anim', '-no-snapshot-save', '-gpu', s.gpu || 'swiftshader_indirect'],
+                  { detached: true, stdio: ['ignore', fd, fd] });
+                let exited = false;
+                child.on('exit', () => {
+                  exited = true;
+                });
+                child.on('error', () => {
+                  exited = true;
+                });
+                child.unref();
+                dev.id = `emulator-${port}`;
+                remember(`android ${dev.id} ${child.pid || 0}`);
+                const began = Date.now();
+                let booted = false;
+                while (!exited && Date.now() - began < BOOT_SECONDS * 1000) {
+                  const r = await adb(dev.id, ['shell', 'getprop', 'sys.boot_completed'], { timeout: 20000 });
+                  if (r.code === 0 && r.stdout.trim() === '1') {
+                    booted = true;
+                    break;
+                  }
+                  await sleep(3000);
+                }
+                if (!booted) throw new Error(`the ${dev.avd} emulator ${exited ? 'stopped' : `didn't start within ${BOOT_SECONDS} s`}: ${lastLines(tailOf(log, 5), 3)}`);
+              }
+              await adb(dev.id, ['shell', 'input', 'keyevent', '82']);
+              for (const scale of ['window_animation_scale', 'transition_animation_scale', 'animator_duration_scale']) await adb(dev.id, ['shell', 'settings', 'put', 'global', scale, '0']);
+              await adb(dev.id, ['shell', 'cmd', 'uimode', 'night', 'no']);
+              // The demo status bar: 9:41, full battery and signal, no notifications.
+              await adb(dev.id, ['shell', 'settings', 'put', 'global', 'sysui_demo_allowed', '1']);
+              for (const command of [['enter'], ['clock', '-e', 'hhmm', '0941'], ['battery', '-e', 'level', '100', '-e', 'plugged', 'false'],
+                ['network', '-e', 'wifi', 'show', '-e', 'level', '4'], ['notifications', '-e', 'visible', 'false']]) {
+                await adb(dev.id, ['shell', 'am', 'broadcast', '-a', 'com.android.systemui.demo', '-e', 'command', ...command]);
+              }
+              const locale = await adb(dev.id, ['shell', 'getprop', 'persist.sys.locale'], { timeout: 20000 });
+              const product = await adb(dev.id, ['shell', 'getprop', 'ro.product.locale'], { timeout: 20000 });
+              dev.system = locale.stdout.trim() || product.stdout.trim() || 'en-US';
+            },
+            async install(dev, app) {
+              const r = await adb(dev.id, ['install', '-r', '-t', '-g', app], { timeout: 600000 });
+              if (r.code !== 0 || !/Success/.test(r.stdout)) throw new Error(`installing the app on ${dev.label} failed: ${lastLines(r.stderr || r.stdout)}`);
+            },
+            async launch(dev, id, locale, region) {
+              const notes = [];
+              // Android 13 and newer switch one app's language (an older one stays in the phone's).
+              if (dev.languages !== false) {
+                const tag = (locale === 'default' ? dev.system : region || locale).replace('_', '-');
+                const r = await adb(dev.id, ['shell', 'cmd', 'locale', 'set-app-locales', id, '--locales', tag], { timeout: 30000 });
+                if (r.code !== 0 || /exception|unknown|error/i.test(r.stdout + r.stderr)) dev.languages = false;
+              }
+              if (dev.languages === false && locale !== 'default') notes.push(`not switched to ${locale}: this Android is older than 13, which switches one app's language`);
+              await adb(dev.id, ['shell', 'am', 'force-stop', id]);
+              const r = await adb(dev.id, ['shell', 'monkey', '-p', id, '-c', 'android.intent.category.LAUNCHER', '1'], { timeout: 60000 });
+              const fatal = r.code !== 0 || /No activities found|monkey aborted/i.test(r.stdout + r.stderr) ? `the app didn't open: ${lastLines(r.stderr || r.stdout)}` : null;
+              return { fatal, notes };
+            },
+            async open(dev, url, id) {
+              const r = await adb(dev.id, ['shell', 'am', 'start', '-W', '-a', 'android.intent.action.VIEW', '-d', quoted(url), id], { timeout: 60000 });
+              return r.code === 0 && !/Error/.test(r.stdout + r.stderr) ? null : `the link ${url} didn't open: ${lastLines(r.stderr || r.stdout)}`;
+            },
+            async shot(dev, file) {
+              const r = await adb(dev.id, ['exec-out', 'screencap', '-p'], { timeout: 60000, binary: true });
+              if (r.code !== 0 || r.stdout.length < 100) return `the screenshot failed: ${lastLines(r.stderr)}`;
+              fs.writeFileSync(file, r.stdout);
+              return null;
+            },
+            async running(dev, id) {
+              const r = await adb(dev.id, ['shell', 'pidof', id], { timeout: 20000 });
+              return r.stdout.trim().length > 0;
+            },
+            /** What the crash log says the app died of, when it crashed. */
+            async crash(dev) {
+              const r = await adb(dev.id, ['logcat', '-d', '-b', 'crash', '-t', '80'], { timeout: 30000 });
+              const lines = r.stdout.split('\n').map((l) => l.replace(/^.*?AndroidRuntime:\s*/, '').trim());
+              const at = lines.findIndex((l) => l.startsWith('FATAL EXCEPTION'));
+              const cause = at < 0 ? null : lines.slice(at + 1).find((l) => /(Exception|Error)\b/.test(l) && !l.startsWith('Process:'));
+              return cause ? `: ${cause.slice(0, 200)}` : '';
+            },
+            async stop(serial, pid) {
+              await adb(serial, ['emu', 'kill'], { timeout: 60000 });
+              if (Number(pid) > 0) {
+                try {
+                  process.kill(Number(pid));
+                } catch {
+                  // stopped already
+                }
+              }
+            },
+          };
+
+          const DRIVERS = { ios: iosDriver, android: androidDriver };
+
+          /** Maestro (tap flows), on the PATH or where its installer puts it; null when it isn't here. */
+          let maestroCommand;
+          const maestroEnv = () => ({ ...process.env, MAESTRO_CLI_NO_ANALYTICS: '1', MAESTRO_DISABLE_UPDATE_CHECK: 'true', MAESTRO_CLI_ANALYSIS_NOTIFICATION_DISABLED: 'true' });
+          async function maestro() {
+            if (maestroCommand !== undefined) return maestroCommand;
+            const places = [process.env.RH_MAESTRO, 'maestro', path.join(os.homedir(), '.maestro', 'bin', process.platform === 'win32' ? 'maestro.bat' : 'maestro')];
+            for (const command of places.filter(Boolean)) {
+              if ((await run(command, ['--version'], { timeout: 120000, env: maestroEnv() })).code === 0) return (maestroCommand = command);
+            }
+            return (maestroCommand = null);
+          }
+
+          /** Runs a Maestro flow on the phone (null when it went through, else why not). */
+          async function runFlow(dev, flow, secrets) {
+            const command = await maestro();
+            if (!command) return 'Maestro is not installed, so the flow did not run (it needs Java 17: curl -fsSL "https://get.maestro.mobile.dev" | bash)';
+            if (!fs.existsSync(flow)) return `the flow ${flow} is missing`;
+            const text = fs.readFileSync(flow, 'utf8');
+            if (/RH_PREVIEW_/.test(text) && !secrets.RH_PREVIEW_USER) return 'not signed in: the test account (RH_PREVIEW_USER, RH_PREVIEW_PASSWORD) is not set';
+            // The test account goes into a copy only this user can read, so it is on no command line.
+            const filled = text.replace(/"?[$][{](RH_PREVIEW_[A-Z0-9_]+)[}]"?/g, (m, k) => (k in secrets ? JSON.stringify(secrets[k]) : m));
+            const file = filled === text ? flow : path.join(path.dirname(flow), `.rh-${process.pid}-${path.basename(flow)}`);
+            if (file !== flow) fs.writeFileSync(file, filled, { mode: 0o600 });
+            try {
+              const r = await run(command, ['--no-ansi', '--device', dev.id, 'test', file], { timeout: 300000, env: maestroEnv() });
+              if (r.code === 0) return null;
+              const lines = `${r.stdout}\n${r.stderr}`.split('\n').map((l) => l.trim()).filter(Boolean);
+              const said = lines.filter((l) => /FAILED|not found|error|exception|assert/i.test(l)).slice(-2).join(' ') || lines.slice(-2).join(' ');
+              return `the flow ${path.basename(flow)} failed: ${said.slice(0, 240)}`;
+            } finally {
+              if (file !== flow) fs.rmSync(file, { force: true });
+            }
+          }
+
+          /** The settings of one platform, with the shared ones (a link base, the sign-in flow, the languages' regions) filled in. */
+          function phoneSettings(cfg, key) {
+            const phone = cfg.phone || {};
+            const own = phone[key] || {};
+            const regions = { ...(phone.locales || {}), ...(own.locales || {}) };
+            return {
+              ...own,
+              devices: own.devices || {},
+              signIn: own.signIn || phone.signIn,
+              linkBase: own.linkBase || phone.linkBase,
+              wait: Number(own.wait ?? phone.wait) || 2500,
+              cwd: path.resolve(own.cwd || phone.cwd || cfg.cwd || '.'),
+              region: (locale) => (typeof regions[locale] === 'string' ? regions[locale] : null),
+            };
+          }
+
+          /** What a screen's route is: the app as it opens, a link into it, or a Maestro flow that taps to it. */
+          function phoneScreen(s, route) {
+            const r = String(route || '').trim();
+            if (!r || r === '/') return { kind: 'start' };
+            if (/\.ya?ml$/i.test(r)) return { kind: 'flow', file: fs.existsSync(path.resolve(KIT, r)) ? path.resolve(KIT, r) : path.resolve(r) };
+            if (r.includes('://')) return { kind: 'link', url: r };
+            if (r.startsWith('/') && s.linkBase) return { kind: 'link', url: s.linkBase.replace(/\/+$/, '') + r };
+            return { kind: 'bad', why: `"${r}" is neither a link into the app (example://tree, or /tree with "linkBase" in the settings) nor a flow (.yaml)` };
+          }
+
+          /** The built app ("*" matches any name; the newest match wins). */
+          function findApp(pattern, cwd) {
+            const full = path.resolve(cwd, pattern);
+            const star = full.indexOf('*');
+            if (star < 0) return fs.existsSync(full) ? full : null;
+            const base = full.slice(0, full.lastIndexOf(path.sep, star));
+            let found = [base];
+            for (const part of full.slice(base.length + 1).split(path.sep)) {
+              const re = globToRegex(part);
+              found = found.flatMap((dir) => {
+                try {
+                  return fs.readdirSync(dir).filter((n) => re.test(n)).map((n) => path.join(dir, n));
+                } catch {
+                  return [];
+                }
+              });
+            }
+            return found.sort((a, b) => fs.statSync(b).mtimeMs - fs.statSync(a).mtimeMs)[0] || null;
+          }
+
+          /** Builds the app for the simulator with its settings' command, its output in rh-build.log. */
+          async function buildApp(s) {
+            if (!s.build) return null;
+            const log = path.join(WORK_DIR, 'rh-build.log');
+            const fd = fs.openSync(log, 'w');
+            const began = Date.now();
+            const code = await new Promise((resolve) => {
+              const child = spawn('bash', ['-c', s.build], { cwd: s.cwd, stdio: ['ignore', fd, fd], env: { ...process.env, CI: 'true' } });
+              const timer = setTimeout(() => child.kill('SIGTERM'), (Number(s.buildTimeout) || 1800) * 1000);
+              child.on('exit', (c) => {
+                clearTimeout(timer);
+                resolve(c ?? 1);
+              });
+              child.on('error', () => {
+                clearTimeout(timer);
+                resolve(127);
+              });
+            });
+            fs.closeSync(fd);
+            const seconds = Math.round((Date.now() - began) / 1000);
+            if (code !== 0) throw new Error(`Building the app failed after ${seconds} s. Last lines of ${log}:\n${tailOf(log, 25)}`);
+            return `Built the app in ${seconds} s.`;
+          }
+
+          /** One screen on the phone: open the app in the language, go to the screen, take the picture, check the app is still there. */
+          async function phoneVisit(driver, dev, s, job, opt, secrets) {
+            const started = Date.now();
+            const issues = [];
+            let file = null;
+            if (job.screen.kind === 'bad') return { name: job.name, size: job.size, locale: job.locale, file: null, seconds: '0.0', issues: [job.screen.why] };
+            const launch = await driver.launch(dev, s.id, job.locale, s.region(job.locale));
+            issues.push(...launch.notes);
+            if (launch.fatal) {
+              issues.push(launch.fatal);
+            } else {
+              await sleep(s.wait);
+              let problem = null;
+              if (job.screen.kind === 'link') problem = await driver.open(dev, job.screen.url, s.id);
+              else if (job.screen.kind === 'flow') problem = await runFlow(dev, job.screen.file, secrets);
+              if (problem) issues.push(problem);
+              if (job.screen.kind !== 'start') await sleep(s.wait);
+              const name = `${opt.phase}-${job.name}${job.locale === 'default' ? '' : `-${job.locale}`}-${job.size}.${driver.ext}`;
+              const shot = await driver.shot(dev, path.join(OUT, name));
+              if (shot) issues.push(shot);
+              else file = name;
+              if ((await driver.running(dev, s.id)) === false) issues.push(`the app closed (it may have crashed)${await driver.crash(dev)}`);
+              if (file && looksEmpty(fs.readFileSync(path.join(OUT, file)))) issues.push('the screen is almost one colour (still loading, a splash screen or empty?)');
+            }
+            return { name: job.name, size: job.size, locale: job.locale, file, seconds: ((Date.now() - started) / 1000).toFixed(1), issues };
+          }
+
+          /** The phone's pictures: the first platform the settings name that this machine can open (or the one asked for). */
+          async function phoneMain(cfg, opt) {
+            const phone = cfg.phone || {};
+            const asked = opt.platform === 'ios' || opt.platform === 'android' ? [opt.platform] : ['ios', 'android'];
+            const configured = asked.filter((key) => phone[key]);
+            if (!configured.length) {
+              console.log(`capture.json has no "phone" settings for ${asked.join(' or ')} yet. Write them once (rh-capture --help shows them); the next run reuses them.`);
+              return 2;
+            }
+            const why = [];
+            let driver = null;
+            for (const key of configured) {
+              const check = await DRIVERS[key].check();
+              if (check.ok) {
+                driver = DRIVERS[key];
+                break;
+              }
+              why.push(`${DRIVERS[key].label}: ${check.why}.`);
+            }
+            if (!driver) {
+              console.log(`This machine can't open the app. ${why.join(' ')}`);
+              return 2;
+            }
+            const s = phoneSettings(cfg, driver.key);
+            if (!s.id) throw new Error(`capture.json needs "phone.${driver.key}.id": the app's ${driver.idName}.`);
+            if (!s.app) throw new Error(`capture.json needs "phone.${driver.key}.app": where the built app is.`);
+            if (!opt.check && !opt.pages.length) throw new Error('Name the screens: --pages "home=/,tree=/tree,profile=flows/profile.yaml".');
+            if (phone.start && !phone.ready) throw new Error('capture.json\'s "phone.start" needs "phone.ready": an address that answers once it is up.');
+            fs.mkdirSync(OUT, { recursive: true });
+            const secrets = readSecrets();
+            const began = Date.now();
+            if (phone.start) console.log(await ensureApp({ baseUrl: phone.ready, ready: phone.ready, start: phone.start, cwd: phone.cwd || cfg.cwd, readyTimeout: phone.readyTimeout }));
+            if (!opt.noBuild) {
+              const built = await buildApp(s);
+              if (built) console.log(built);
+            }
+            const app = findApp(s.app, s.cwd);
+            if (!app) throw new Error(`The built app isn't at ${s.app} (in ${s.cwd}): check "build" and "app" in capture.json.`);
+            if (opt.sizes && opt.sizes.some((size) => !PHONE_SIZES.includes(size))) console.log('A phone app has the sizes phone and tablet; the others are left out.');
+            const fitting = (opt.sizes || ['phone']).filter((size) => PHONE_SIZES.includes(size));
+            const sizes = opt.check || !fitting.length ? ['phone'] : fitting;
+            const locales = opt.check ? ['default'] : opt.locales || ['default', ...new Set([...Object.keys(cfg.locales || {}), ...Object.keys(phone.locales || {})])];
+            const screens = opt.check ? [{ name: 'start', screen: { kind: 'start' } }] : namedPages(opt).map((p) => ({ name: p.name, screen: phoneScreen(s, p.route) }));
+            const phase = opt.check ? 'page-check' : opt.phase;
+            const results = [];
+            const on = [];
+            let failed = false;
+            for (const size of sizes) {
+              let dev = null;
+              try {
+                dev = await driver.device(size, s);
+                await driver.start(dev, s);
+                await driver.install(dev, app, s.id);
+              } catch (err) {
+                failed = true;
+                const problem = String(err.message || err);
+                for (const locale of locales) for (const sc of screens) results.push({ name: sc.name, size, locale, file: null, seconds: '0.0', issues: [problem] });
+                continue;
+              }
+              on.push(dev.label);
+              console.log(`Phone: ${dev.label}, with ${path.basename(app)}.`);
+              if (s.signIn) {
+                const launch = await driver.launch(dev, s.id, 'default', null);
+                let problem = launch.fatal;
+                if (!problem) {
+                  await sleep(s.wait);
+                  problem = await runFlow(dev, path.resolve(KIT, s.signIn), secrets);
+                }
+                console.log(`Sign-in on ${dev.label}: ${problem || `signed in with ${s.signIn}`}.`);
+                if (problem) failed = true;
+              }
+              for (const locale of locales) for (const sc of screens) results.push(await phoneVisit(driver, dev, s, { ...sc, size, locale }, { ...opt, phase }, secrets));
+            }
+            if (opt.check) {
+              const start = results[0];
+              console.log(start && !start.issues.length ? `The app opens on ${on.join(', ')} (${start.seconds} s).` : `The app: ${start ? start.issues.join('; ') : 'not opened'}.`);
+              return failed || !start || start.issues.length ? 1 : 0;
+            }
+            report(results, { ...opt, phase }, began, `of the app on ${on.join(' and ') || driver.label}`);
+            return 0;
+          }
+
+          /**
+           * The phone apps this checkout holds, by their project files (plan 1.35): a Flutter app (its ios and android folders), a React
+           * Native or Expo app, an Xcode project, an Android app (its src/main manifest).
+           */
+          function phoneAppsIn(root) {
+            const found = new Set();
+            const skip = new Set(['node_modules', 'Pods', 'build', 'dist', 'DerivedData', 'vendor']);
+            let visited = 0;
+            const walk = (dir, depth) => {
+              if (++visited > 3000) return;
+              let entries;
+              try {
+                entries = fs.readdirSync(dir, { withFileTypes: true });
+              } catch {
+                return;
+              }
+              const names = new Set(entries.map((e) => e.name));
+              if (names.has('pubspec.yaml')) {
+                if (names.has('ios')) found.add('iOS');
+                if (names.has('android')) found.add('Android');
+              }
+              if (names.has('package.json')) {
+                try {
+                  const pkg = JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+                  const deps = { ...(pkg.dependencies || {}), ...(pkg.devDependencies || {}) };
+                  if (deps['react-native'] || deps.expo) {
+                    found.add('iOS');
+                    found.add('Android');
+                  }
+                } catch {
+                  // not a package.json that can be read
+                }
+              }
+              if (entries.some((e) => /[.](xcodeproj|xcworkspace)$/.test(e.name))) found.add('iOS');
+              if (names.has('AndroidManifest.xml') && /src[/\\]main$/.test(dir)) found.add('Android');
+              if (depth > 0) {
+                for (const e of entries) if (e.isDirectory() && !e.name.startsWith('.') && !skip.has(e.name)) walk(path.join(dir, e.name), depth - 1);
+              }
+            };
+            walk(root, 4);
+            return ['iOS', 'Android'].filter((p) => found.has(p));
+          }
+
+          /** What this checkout holds, then what this machine can open, per platform. */
+          async function listPhones() {
+            const here = phoneAppsIn(process.cwd());
+            console.log(`here: ${here.length ? here.join(', ') : 'none'}`);
+            let any = false;
+            for (const driver of Object.values(DRIVERS)) {
+              const check = await driver.check();
+              any = any || check.ok;
+              console.log(check.ok ? `${driver.key}: ready (${check.note})` : `${driver.key}: not here: ${check.why}.`);
+            }
+            console.log((await maestro()) ? 'maestro: ready' : 'maestro: not installed (flows need it; it needs Java 17: curl -fsSL "https://get.maestro.mobile.dev" | bash)');
+            return any ? 0 : 1;
+          }
+
+          /** Stops the phones rh-capture started (a phone that was running already is left as it was). */
+          async function stopPhones() {
+            if (!fs.existsSync(PHONES_STARTED)) return 0;
+            const lines = fs.readFileSync(PHONES_STARTED, 'utf8').split('\n').filter(Boolean);
+            for (const line of lines) {
+              const [kind, id, pid] = line.split(' ');
+              if (DRIVERS[kind]) await DRIVERS[kind].stop(id, pid);
+            }
+            fs.rmSync(PHONES_STARTED, { force: true });
+            console.log(`Stopped ${lines.length} phone(s) rh-capture started.`);
+            return 0;
+          }
+
+          // ─── Games (plan 1.34) ──────────────────────────────────────────────────
+          // A game draws everything itself, so there is no page to read: it takes its own pictures through a picture mode (a few lines
+          // the agent adds), and rh-capture runs that per screen, size and language, under a virtual screen where there is no display.
+
+          /** A game's picture sizes, unless its settings say otherwise: wide on a computer, tall on a phone and a tablet. */
+          const GAME_SIZES = { desktop: '1920x1080', phone: '1170x2532', tablet: '2048x2732' };
+
+          function gameSettings(cfg) {
+            const game = cfg.game || {};
+            return { ...game, sizes: { ...GAME_SIZES, ...(game.sizes || {}) }, cwd: path.resolve(game.cwd || cfg.cwd || '.'), timeout: (Number(game.shotTimeout) || 180) * 1000 };
+          }
+
+          /** Linux without a display needs a virtual screen: xvfb-run's, when it is installed (null: no screen to be had). */
+          async function screenWrap(width, height) {
+            if (process.platform !== 'linux' || process.env.DISPLAY || process.env.WAYLAND_DISPLAY) return [];
+            const xvfb = await run('xvfb-run', ['--help'], { timeout: 20000 });
+            return xvfb.code === 127 ? null : ['xvfb-run', '-a', '-s', `-screen 0 ${width}x${height}x24`];
+          }
+
+          /** Runs one of the game's commands with the values filled in, its output added to rh-game.log; its exit code and what it said. */
+          function gameCommand(command, values, wrap, cwd, timeout) {
+            const text = command.replace(/[{](screen|file|locale|width|height|size)[}]/g, (m, k) => values[k]);
+            const log = path.join(WORK_DIR, 'rh-game.log');
+            fs.appendFileSync(log, `\n$ ${text}\n`);
+            const from = fs.statSync(log).size;
+            const fd = fs.openSync(log, 'a');
+            return new Promise((resolve) => {
+              const [file, ...args] = [...wrap, 'bash', '-c', text];
+              const child = spawn(file, args, {
+                cwd,
+                stdio: ['ignore', fd, fd],
+                env: { ...process.env, RH_SCREEN: values.screen, RH_SHOT: values.file, RH_LOCALE: values.locale, RH_WIDTH: values.width, RH_HEIGHT: values.height },
+              });
+              const timer = setTimeout(() => child.kill('SIGTERM'), timeout);
+              const done = (code) => {
+                clearTimeout(timer);
+                fs.closeSync(fd);
+                resolve({ code, said: fs.readFileSync(log).subarray(from).toString('utf8') });
+              };
+              child.on('exit', (c) => done(c ?? 1));
+              child.on('error', () => done(127));
+            });
+          }
+
+          /** One picture: the game opens the screen at the size and in the language, saves the picture, and quits. */
+          async function gameShot(g, job, opt) {
+            const started = Date.now();
+            const [width, height] = String(g.sizes[job.size] || GAME_SIZES.desktop).split('x');
+            const name = `${opt.phase}-${job.name}${job.locale === 'default' ? '' : `-${job.locale}`}-${job.size}.png`;
+            const file = path.resolve(OUT, name);
+            fs.rmSync(file, { force: true });
+            const issues = [];
+            const wrap = await screenWrap(width, height);
+            if (wrap === null) {
+              issues.push('no screen here: this Linux machine has no display and no xvfb-run (install xvfb), so the game can\'t draw');
+            } else {
+              const r = await gameCommand(g.shot, { screen: job.route, file, locale: job.locale, width, height, size: job.size }, wrap, g.cwd, g.timeout);
+              const saved = fs.existsSync(file) && fs.statSync(file).size > 0;
+              if (!saved) issues.push(`no picture: the game's picture mode didn't save ${name} (exit ${r.code})${r.said.trim() ? `: ${lastLines(r.said, 3)}` : ''}`);
+              else if (looksEmpty(fs.readFileSync(file))) issues.push('the picture is almost one colour (still loading, or the screen drew nothing)');
+            }
+            return { name: job.name, size: job.size, locale: job.locale, file: issues.some((i) => i.startsWith('no ')) ? null : name, seconds: ((Date.now() - started) / 1000).toFixed(1), issues };
+          }
+
+          async function gameMain(cfg, opt) {
+            if (!cfg.game || !cfg.game.shot) {
+              console.log('capture.json has no "game" settings with a "shot" command yet. Write them once (rh-capture --help shows them, with the picture mode for Godot and Unity); the next run reuses them.');
+              return 2;
+            }
+            const g = gameSettings(cfg);
+            if (!opt.check && !opt.pages.length) throw new Error('Name the screens: --pages "menu=main_menu,shop=shop".');
+            fs.mkdirSync(OUT, { recursive: true });
+            const began = Date.now();
+            if (g.build && !opt.noBuild) console.log(await buildApp(g));
+            if (opt.sizes && opt.sizes.some((size) => !g.sizes[size])) console.log(`The sizes are ${Object.keys(g.sizes).join(', ')}; the others are left out.`);
+            const fitting = (opt.sizes || ['desktop']).filter((size) => g.sizes[size]);
+            const sizes = opt.check || !fitting.length ? ['desktop'] : fitting;
+            const locales = opt.check ? ['default'] : opt.locales || ['default', ...Object.keys(cfg.locales || {})];
+            const screens = opt.check ? [{ name: 'check', route: String(g.check ?? '') }] : namedPages(opt).map((p) => ({ name: p.name, route: p.route.replace(/^[/]/, '') }));
+            const phase = opt.check ? 'page-check' : opt.phase;
+            const results = [];
+            for (const size of sizes) for (const locale of locales) for (const sc of screens) results.push(await gameShot(g, { ...sc, size, locale }, { ...opt, phase }));
+            if (opt.check) {
+              const one = results[0];
+              console.log(one.issues.length ? `The picture mode: ${one.issues.join('; ')}.` : `The picture mode works (${one.seconds} s).`);
+              return one.issues.length ? 1 : 0;
+            }
+            report(results, { ...opt, phase }, began, 'of the game');
+            return 0;
+          }
+
+          /** What this machine has for games: Godot, Unity, and a screen to draw on. */
+          async function listGames() {
+            const home = os.homedir();
+            const places = (list) => list.filter(Boolean);
+            let godot = null;
+            for (const command of places([process.env.RH_GODOT, 'godot', 'godot4', '/Applications/Godot.app/Contents/MacOS/Godot'])) {
+              const r = await run(command, ['--version'], { timeout: 60000 });
+              if (r.code === 0) {
+                godot = `${command} ${r.stdout.trim().split('\n').pop()}`;
+                break;
+              }
+            }
+            console.log(godot ? `godot: ready (${godot})` : 'godot: not here (download the version the game names from https://github.com/godotengine/godot/releases)');
+            const editors = [];
+            for (const dir of [path.join('/Applications', 'Unity', 'Hub', 'Editor'), path.join(home, 'Unity', 'Hub', 'Editor'), 'C:/Program Files/Unity/Hub/Editor']) {
+              try {
+                editors.push(...fs.readdirSync(dir));
+              } catch {
+                // no Unity Hub editors there
+              }
+            }
+            console.log(editors.length || process.env.RH_UNITY ? `unity: ready (${process.env.RH_UNITY || editors.sort().pop()}; its licence must be active)` : 'unity: not here (Unity Hub with an editor, and its licence)');
+            const wrap = await screenWrap(1920, 1080);
+            console.log(wrap === null ? 'screen: none (no display and no xvfb-run: install xvfb)' : wrap.length ? 'screen: a virtual one (xvfb-run)' : 'screen: ready');
+            return godot || editors.length || process.env.RH_UNITY ? 0 : 1;
+          }
+
+          async function main() {
+            const opt = parseArgs(process.argv.slice(2));
+            if (opt.help) {
+              console.log(`${HELP}\n\n${PHONE_HELP}\n\n${GAME_HELP}`);
+              return 0;
+            }
+            if (opt.stop) return stopPhones();
+            if (opt.phones) return listPhones();
+            if (opt.games) return listGames();
+            const configPath = opt.config || path.join(KIT, 'capture.json');
+            if (!fs.existsSync(configPath)) {
+              console.log(`No settings at ${configPath}. Write them once (rh-capture --help shows the format); the next run reuses them.`);
+              return 2;
+            }
+            const cfg = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+            // A game or a phone app when asked for, or when the settings have only the game's or the phone's.
+            if (opt.platform === 'game' || (!opt.platform && !cfg.baseUrl && !cfg.phone && cfg.game)) return gameMain(cfg, opt);
+            if (opt.platform ? opt.platform !== 'web' : !cfg.baseUrl && cfg.phone) return phoneMain(cfg, opt);
+            if (!cfg.baseUrl) throw new Error(`${configPath} needs "baseUrl".`);
+            if (!opt.check && !opt.pages.length) throw new Error('Name the pages: --pages "dashboard=/home,orders=/orders".');
+            fs.mkdirSync(OUT, { recursive: true });
+            const secrets = readSecrets();
+            const began = Date.now();
+            console.log(await ensureApp(cfg));
+            const { chromium } = loadPlaywright();
+            const browser = await chromium.launch({ headless: true, args: ['--no-sandbox', '--enable-unsafe-swiftshader'] });
+            try {
+              const statePath = path.join(process.env.RH_WORK || os.tmpdir(), 'rh-capture-state.json');
+              const login = await signIn(browser, cfg, secrets, statePath);
+              console.log(`Sign-in: ${login.note}.`);
+              const loginPath = cfg.login && cfg.login.url ? new URL(cfg.login.url, cfg.baseUrl).pathname : null;
+              if (opt.check) {
+                const context = await browser.newContext({ ...SIZES.desktop, ignoreHTTPSErrors: true, storageState: login.state });
+                await prepareContext(context, cfg, secrets, null);
+                const home = await visit(context, cfg, { name: 'home', route: cfg.home || '/', size: 'desktop', locale: 'default' }, { ...opt, phase: 'page-check' }, loginPath);
+                await context.close();
+                console.log(home.issues.length ? `Home page: ${home.issues.join('; ')}.` : `Home page: loaded in ${home.seconds} s.`);
+                return login.failed || home.issues.some((i) => i.startsWith("didn't load")) ? 1 : 0;
+              }
+              const pages = namedPages(opt);
+              const sizes = (opt.sizes || ['desktop', 'phone']).filter((s) => SIZES[s]);
+              const locales = opt.locales || ['default', ...Object.keys(cfg.locales || {})];
+              const contexts = new Map();
+              for (const size of sizes) {
+                for (const locale of locales) {
+                  const context = await browser.newContext({ ...SIZES[size], ignoreHTTPSErrors: true, storageState: login.state });
+                  await prepareContext(context, cfg, secrets, locale === 'default' ? null : locale);
+                  contexts.set(`${size}/${locale}`, context);
+                }
+              }
+              const jobs = [];
+              for (const p of pages) for (const size of sizes) for (const locale of locales) jobs.push({ ...p, size, locale });
+              const results = await pool(jobs, 3, (job) => visit(contexts.get(`${job.size}/${job.locale}`), cfg, job, opt, loginPath));
+              for (const c of contexts.values()) await c.close();
+              report(results, opt, began);
+              return 0;
+            } finally {
+              await browser.close();
+            }
+          }
+
+          main().then(
+            (code) => process.exit(code ?? 0),
+            (err) => {
+              console.error(`rh-capture: ${String(err.message || err)}`);
+              process.exit(1);
+            },
+          );
+          RH_CAPTURE_END
+            printf '#!/usr/bin/env bash\nexec node "%s/capture.mjs" "$@"\n' "$TOOLS" > "$TOOLS/rh-capture"
+            cat > "$TOOLS/rh-memory" <<'RH_MEMORY_END'
+          #!/usr/bin/env bash
+          # rh-memory: looks things up in ReleaseHub's record of this agent's earlier runs (what was tried, what reviewers said).
+          #   rh-memory search WORDS...   runs that mention all the words, newest first
+          #   rh-memory run RUN-KEY       one run: its task, plan, feedback, answer, pull request and files
+          set -euo pipefail
+          case "${1:-}" in
+            search) shift; curl -sS -G "$RH_LOOKUP_URL" --data-urlencode "q=$*" -H "X-ReleaseHub-Lookup-Token: $RH_LOOKUP_TOKEN" -H "tenant: $RH_TENANT" ;;
+            run) curl -sS "$RH_LOOKUP_URL/${2:?give a run key, such as RUN-12}" -H "X-ReleaseHub-Lookup-Token: $RH_LOOKUP_TOKEN" -H "tenant: $RH_TENANT" ;;
+            *) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//' ;;
+          esac
+          echo
+          RH_MEMORY_END
+            chmod +x "$TOOLS/rh-verify" "$TOOLS/rh-capture" "$TOOLS/rh-memory"
+            export PATH="$TOOLS:$PATH" RH_WORK="$WORK" RH_KIT="$PWD/$KIT_DIR" RH_SHOTS="$PWD/$SHOTS_DIR" RH_APP_LOG="$WORK/app.log" RH_APP_PIDS="$WORK/app.pids"
+          }
+
+          # Before the agent starts: start the app and sign in with the saved preview settings, so the agent begins with a running app
+          # (or with the reason it didn't start) instead of spending its first steps on it. No model call is made here.
+          app_check() {
+            : > "$WORK/app.txt"
+            [ -n "$BROWSER" ] && [ -f "$KIT_DIR/capture.json" ] || return 0
+            # Settings for the phone app only: phone_check opens it.
+            [ "$(jq -r 'has("phone") and (has("baseUrl") | not)' "$KIT_DIR/capture.json" 2>/dev/null)" != "true" ] || return 0
+            if within 300 "$TOOLS/rh-capture" --platform web --check > "$WORK/app.txt" 2>&1; then
+              log "Started the app with the saved preview settings$(grep -q '^Sign-in: signed in' "$WORK/app.txt" && printf ' and signed in with the test account')."
+            else
+              log "The saved preview settings didn't work, so the agent starts by fixing them: $(said "$WORK/app.txt" | tail -c 240)" warning
+            fi
+            return 0
+          }
+
+          # Before the agent starts: build the phone app and open it on the phone with the saved settings, so the agent begins with it
+          # built (a first build takes minutes) or with the reason it didn't work.
+          phone_check() {
+            : > "$WORK/phone-app.txt"
+            [ -n "$PHONE" ] && [ -f "$KIT_DIR/capture.json" ] || return 0
+            [ "$(jq -r 'has("phone")' "$KIT_DIR/capture.json" 2>/dev/null)" = "true" ] || return 0
+            log "Building the phone app and opening it with the saved settings (a first build takes a few minutes)."
+            if within 2400 "$TOOLS/rh-capture" --platform phone --check > "$WORK/phone-app.txt" 2>&1; then
+              log "Built the phone app and opened it on $(grep -m1 '^Phone: ' "$WORK/phone-app.txt" | sed 's/^Phone: //; s/, with .*//')$(grep -q '^Sign-in on .*: signed in' "$WORK/phone-app.txt" && printf ', signed in with the test account')."
+            else
+              log "The saved phone settings didn't work, so the agent starts by fixing them: $(said "$WORK/phone-app.txt" | tail -c 240)" warning
+            fi
+            return 0
+          }
+
+          # The run's other repositories (a task across frontend and backend): cloned next to this one on the run's branch, each with
+          # its own pull request. Lines in extras.txt: name, folder, base branch (tab separated).
+          EXTRA_ROOT="$WORK/repos"
+          : > "$WORK/extras.txt"
+          repo_url() {
+            if [ -n "${GITHUB_RUN_ID:-}" ]; then
+              case "$1" in */*) printf 'https://github.com/%s.git' "$1" ;; *) printf 'https://github.com/%s/%s.git' "${GITHUB_REPOSITORY_OWNER:-}" "$1" ;; esac
+            else
+              printf '%s%s/_git/%s' "${SYSTEM_COLLECTIONURI:-}" "$(printf '%s' "${SYSTEM_TEAMPROJECT:-}" | sed 's/ /%20/g')" "$1"
+            fi
+          }
+          git_auth_header() {
+            if [ -n "${GITHUB_RUN_ID:-}" ]; then
+              printf 'AUTHORIZATION: basic %s' "$(printf 'x-access-token:%s' "${GH_TOKEN:-}" | base64 | tr -d '\n')"
+            else
+              printf 'AUTHORIZATION: bearer %s' "${SYSTEM_ACCESSTOKEN:-}"
+            fi
+          }
+          clone_extras() {
+            : > "$WORK/extras.txt"
+            local name dir base
+            while IFS= read -r name; do
+              [ -n "$name" ] || continue
+              dir="$EXTRA_ROOT/$(basename "$name")"
+              if [ ! -d "$dir/.git" ]; then
+                mkdir -p "$EXTRA_ROOT"
+                if ! git -c http.extraheader="$(git_auth_header)" clone -q "$(repo_url "$name")" "$dir" 2>"$WORK/clone-err.txt"; then
+                  log "Couldn't clone $name, so the agent works without it: $(said "$WORK/clone-err.txt" | tail -c 200) $(permission_help)" warning
+                  continue
+                fi
+                git -C "$dir" config http.extraheader "$(git_auth_header)"
+                git -C "$dir" config user.name "ReleaseHub agent"
+                git -C "$dir" config user.email "agent@users.noreply.releasehub.app"
+              fi
+              git -C "$dir" fetch -q origin || true
+              base="$RH_BASE"
+              if ! git -C "$dir" rev-parse -q --verify "origin/$base" >/dev/null; then
+                base=$(git -C "$dir" symbolic-ref --short refs/remotes/origin/HEAD 2>/dev/null | sed 's#^origin/##')
+              fi
+              if git -C "$dir" rev-parse -q --verify "origin/$RH_BRANCH" >/dev/null; then
+                git -C "$dir" checkout -q -B "$RH_BRANCH" "origin/$RH_BRANCH"
+              elif [ "$(git -C "$dir" rev-parse --abbrev-ref HEAD)" != "$RH_BRANCH" ]; then
+                git -C "$dir" checkout -q -B "$RH_BRANCH" "origin/$base"
+              fi
+              printf '%s\t%s\t%s\n' "$name" "$dir" "$base" >> "$WORK/extras.txt"
+            done < <(jq -r '(.workspace.repositories // [])[] | .name' "$WORK/context.json")
+            return 0
+          }
+          # The other repositories with changes the agent made (names, space separated).
+          extras_changed() {
+            local name dir base changed=""
+            while IFS=$'\t' read -r name dir base; do
+              [ -z "$(git -C "$dir" status --porcelain)" ] || changed="$changed $name"
+            done < "$WORK/extras.txt"
+            printf '%s' "${changed# }"
+          }
+          # Commits, pushes and opens (or finds) a pull request in each other repository the agent changed: extra-prs.json for the result.
+          push_extras() {
+            echo '[]' > "$WORK/extra-prs.json"
+            local name dir base num url files line
+            while IFS=$'\t' read -r name dir base; do
+              git -C "$dir" add -A
+              git -C "$dir" diff --cached --quiet || git -C "$dir" commit -q -m "$KEY: $TITLE" -m "Made by a ReleaseHub agent run."
+              [ -n "$(git -C "$dir" log --oneline "origin/$base..HEAD" 2>/dev/null)" ] || continue
+              if ! git -C "$dir" push -q origin "$RH_BRANCH" 2>"$WORK/push-err.txt"; then
+                log "Pushing $RH_BRANCH to $name failed: $(said "$WORK/push-err.txt" | tail -c 200) $(permission_help)" warning
+                continue
+              fi
+              line=$(open_extra_pr "$name" "$base" "$dir") || continue
+              num=${line%% *}
+              url=${line#* }
+              files=$(git -C "$dir" diff --name-only "origin/$base...HEAD" | wc -l | tr -d ' ')
+              jq --arg r "$name" --argjson n "$num" --arg u "$url" --arg sha "$(git -C "$dir" rev-parse HEAD)" --argjson f "$files" \
+                '. + [{repository: $r, number: $n, url: $u, headSha: $sha, changedFiles: $f}]' "$WORK/extra-prs.json" > "$WORK/extra-prs.tmp"
+              mv "$WORK/extra-prs.tmp" "$WORK/extra-prs.json"
+              log "Pushed $(git -C "$dir" rev-parse --short HEAD) to $RH_BRANCH in $name."
+            done < "$WORK/extras.txt"
+            return 0
+          }
+          # Prints "NUMBER URL" of the open pull request from the run's branch in another repository, opening it when there is none:
+          # into the run's target when that repository has it, else into the branch it started from there.
+          open_extra_pr() {
+            local name=$1 base=$2 dir=$3 num url body
+            if [ "$TARGET" != "$RH_BASE" ] && git -C "$dir" rev-parse -q --verify "origin/$TARGET" >/dev/null; then
+              base="$TARGET"
+            fi
+            body=$(printf 'Opened by ReleaseHub agent run %s, with its pull request in %s.' "$KEY" "${BUILD_REPOSITORY_NAME:-${GITHUB_REPOSITORY:-}}")
+            [ -z "$RUN_LINK" ] || body=$(printf '%s\n\n%s' "$body" "$RUN_LINK")
+            if [ -n "${GITHUB_RUN_ID:-}" ]; then
+              local slug="$name"
+              case "$slug" in */*) ;; *) slug="${GITHUB_REPOSITORY_OWNER:-}/$slug" ;; esac
+              num=$(gh pr list -R "$slug" --head "$RH_BRANCH" --state open --json number --jq '.[0].number // empty')
+              if [ -z "$num" ]; then
+                gh pr create -R "$slug" --base "$base" --head "$RH_BRANCH" --title "$KEY: $TITLE" --body "$body" >/dev/null 2>"$WORK/pr-err.txt" \
+                  || { log "Opening the pull request in $name failed: $(said "$WORK/pr-err.txt" | tail -c 200)" warning; return 1; }
+                num=$(gh pr list -R "$slug" --head "$RH_BRANCH" --state open --json number --jq '.[0].number')
+              fi
+              url=$(gh pr view -R "$slug" "$num" --json url --jq .url)
+            else
+              az extension add -n azure-devops --only-show-errors >/dev/null 2>&1 || true
+              export AZURE_DEVOPS_EXT_PAT="$SYSTEM_ACCESSTOKEN"
+              num=$(az repos pr list --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$name" \
+                --source-branch "$RH_BRANCH" --status active --query "[0].pullRequestId" -o tsv)
+              if [ -z "$num" ]; then
+                num=$(az repos pr create --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$name" \
+                  --source-branch "$RH_BRANCH" --target-branch "$base" --title "$KEY: $TITLE" --description "$body" --query pullRequestId -o tsv 2>"$WORK/pr-err.txt") \
+                  || { log "Opening the pull request in $name failed: $(said "$WORK/pr-err.txt" | tail -c 200)" warning; return 1; }
+              fi
+              url="${SYSTEM_COLLECTIONURI}${SYSTEM_TEAMPROJECT}/_git/${name}/pullrequest/$num"
+            fi
+            printf '%s %s' "$num" "$url"
+          }
+
+          # The app processes rh-capture started (each in its own process group), and the phones it started.
+          stop_app() {
+            if [ -n "${RH_PHONES_STARTED:-}" ] && [ -f "$RH_PHONES_STARTED" ]; then "$TOOLS/rh-capture" --stop >/dev/null 2>&1 || true; fi
+            [ -f "$WORK/app.pids" ] || return 0
+            while read -r pid; do
+              kill -- "-$pid" 2>/dev/null || kill "$pid" 2>/dev/null || true
+            done < "$WORK/app.pids"
+            rm -f "$WORK/app.pids"
+          }
+
+          # Everything the agent needs before it starts: the task's files, the repository notes, its earlier conversation, its helpers,
+          # a browser and the app running.
+          prepare() {
+            # Screenshots and task files of an earlier stage (or an earlier run, on your own machine) were sent already.
+            rm -rf "$SHOTS_DIR" "$FILES_DIR"
+            fetch_files
+            prepare_notes
+            restore_session
+            write_tools
+            clone_extras
+            RH_LOOKUP_TOKEN=$(jq -r '.lookup.token // empty' "$WORK/context.json")
+            export RH_LOOKUP_TOKEN RH_LOOKUP_URL="$API/api/v1/ai/runner/runs/$RH_RUN/lookup"
+            keep_test_account
+            setup_browser
+            setup_phone
+            setup_game
+            app_check
+            phone_check
+            prompt > "$WORK/prompt.md"
+          }
+
+          # After the agent: keep its conversation, the notes it updated, its screenshots and the preview kit.
+          wrap_up() {
+            save_session
+            collect_notes
+            upload_screenshots
+            save_kit
+          }
+
+          prompt() {
+            local creds=""
+            [ ! -f "$WORK/preview.env" ] || creds=1
+            jq -r --arg stage "$RH_STAGE" --arg notes "$NOTES_FILE" --rawfile files "$WORK/files.txt" --rawfile app "$WORK/app.txt" --rawfile extras "$WORK/extras.txt" \
+              --arg browser "$BROWSER" --arg shots "$PWD/$SHOTS_DIR" --arg kit "$PWD/$KIT_DIR" --arg creds "$creds" \
+              --arg phone "$PHONE" --arg phoneon "$PHONE_ON" --arg phonetool "$PHONE_TOOL" --rawfile phoneapp "$WORK/phone-app.txt" \
+              --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" '
+              "You are a coding agent working in the repository " + .repository.name + " for ReleaseHub run " + .run.key + ".\n\n" +
+              (if $stage == "answer"
+                then (if .discussing then "You are discussing a change with the person who asked for it (below). You are on its branch: read the actual code. " +
+                    "Answer their message; when they want something different, say concretely what you would change and where (files, components, structure). Do not change any files now.\n\n"
+                  else "Answer the question below from the code in this repository. Read what you need; do not change any files. " end) +
+                  "Write in Markdown for the person who asked: plain language first, then the details, naming the files you relied on.\n\n"
+              elif $stage == "planning"
+                then "Write an implementation plan in Markdown: the files you will change, the steps and the tests. Cover the whole scope of the task — " +
+                  "if it asks for a redesign or a structural change, plan that, not small cosmetic edits. Do not change any files in this step.\n\n"
+                else "Implement the task" + (if .plan then ", following the approved plan" else "" end) +
+                  (if .feedback then " and addressing the latest feedback" else "" end) +
+                  ". Make every change the plan and the feedback call for, including structural ones (new components, layout and flow changes); " +
+                  "do not stop at small edits. If the feedback asks for more than the plan covered, rethink the approach and do the larger change. " +
+                  "Add or update tests. Do not commit or push: the workflow does that.\n\n" end) +
+              (if .memory then "## What earlier runs learned about this repository\nYour memory file (" + $notes + ") holds it — trust it and do not explore again what it already says.\n\n" else "" end) +
+              (if .discussing then "## The change being discussed: " + .discussing.key + " — " + .discussing.title + " (" + .discussing.status + ")\nTask: " + .discussing.task + "\n" +
+                (if (.discussing.plan // "") != "" then "\nIts plan:\n" + .discussing.plan + "\n" else "" end) +
+                (if (.discussing.changedFiles | length) > 0 then "\nFiles it changed: " + (.discussing.changedFiles | join(", ")) + "\n" else "" end) +
+                (if .discussing.pullRequest then "Pull request: " + .discussing.pullRequest + "\n" else "" end) + "\n" else "" end) +
+              (if .conversation then "## Earlier in this conversation\n" + ([.conversation[] | "Question: " + .question + "\n\nAnswer: " + (.answer // "(no answer)")] | join("\n\n---\n\n")) + "\n\n" else "" end) +
+              (if $stage == "answer" then "## Question\n" else "## Task\n" end) + .prompt + "\n" +
+              (if .workItem then "\n## Work item " + .workItem.key + ": " + .workItem.title + "\n" +
+                "Type: " + (.workItem.type // "") + " · Status: " + (.workItem.status // "") + " · Priority: " + (.workItem.priority // "") +
+                (if .workItem.tags then " · Tags: " + .workItem.tags else "" end) + "\n\n" + (.workItem.description // "") +
+                (if (.workItem.acceptanceCriteria // "") != "" then "\n\nAcceptance criteria:\n" + .workItem.acceptanceCriteria else "" end) + "\n" +
+                (if .workItem.fields then "\nOther fields:\n" + ([.workItem.fields | to_entries[] | "- " + .key + ": " + .value] | join("\n")) + "\n" else "" end) +
+                (if .workItem.parent then "\nPart of " + .workItem.parent.key + " (" + .workItem.parent.type + "): " + .workItem.parent.title +
+                  (if (.workItem.parent.description // "") != "" then "\n" + .workItem.parent.description else "" end) +
+                  (if (.workItem.parent.comments // []) | length > 0 then "\nIts discussion (oldest first):\n" + ([.workItem.parent.comments[] | "- " + .author + " (" + .at + "): " + .body] | join("\n")) else "" end) + "\n" else "" end)
+              else "" end) +
+              (if .comments then "\n## Discussion on the work item (oldest first)\n" + ([.comments[] | "- " + .author + " (" + .at + "): " + .body] | join("\n")) + "\n" else "" end) +
+              (if $files != "" then "\n## Files attached to the work item\nThese are part of the scope: read every one, and look at the images (screenshots, mockups, designs) with your Read tool before you start. Do not commit them.\n" + $files else "" end) +
+              (if .request then "\n## Client request " + .request.key + ": " + .request.title + "\n" + (.request.description // "") + "\n" else "" end) +
+              (if .plan and $stage != "planning" then "\n## Approved plan\n" + .plan + "\n" else "" end) +
+              (if .designSystem then "\n## Client design system (version \(.designSystem.version))\nUse these tokens: " + (.designSystem | del(.version) | tostring) + "\n" else "" end) +
+              (if .prototype then "\n## Approved prototype\n" + .prototype.key + " v\(.prototype.version) is what the client approved (" + (.prototype.previewUrl // "") + "); its files are on this branch under prototypes/.\n" else "" end) +
+              (if .feedback then "\n## Feedback from earlier rounds\n" + ([.feedback[] | "- Round \(.round) (\(.kind)): \(.feedback)"] | join("\n")) + "\n" else "" end) +
+              (if .history then "\n## Earlier runs on this work item (newest first)\nBuild on them: keep what worked, and do not repeat what the reviewer rejected.\n" +
+                ([.history[] | "- " + .key + " (" + .at + ", " + .kind + ", " + .outcome + "): " + .prompt +
+                  (if .feedback then "\n  Reviewer feedback: " + (.feedback | join(" / ")) else "" end) +
+                  (if .plan then "\n  Its plan began:\n" + (.plan | split("\n") | map("    " + .) | join("\n")) else "" end) +
+                  (if .answer then "\n  Answer given: " + .answer else "" end) +
+                  (if .pullRequest then "\n  Pull request: " + .pullRequest + " (" + (.changedFiles | tostring) + " files)" else "" end)] | join("\n")) + "\n" else "" end) +
+              (if .personFeedback then "\n## What the person who started this run asked for on other runs (newest first)\nTheir preferences: apply what fits this task.\n" +
+                ([.personFeedback[] | "- " + .feedback + " (" + .run + ", " + .at + ")"] | join("\n")) + "\n" else "" end) +
+              (if (.personNotes // "") != "" then "\n## How the person who started this run likes the work done\n" + .personNotes + "\n" else "" end) +
+              (if .project then "\n## Project map\n" + .project.notes + "\n" else "" end) +
+              (if $extras != "" then "\n## Other repositories in this task\nThis task also covers these repositories, cloned next to this one. Work in each one the task needs, and keep them consistent: " +
+                (if $stage == "planning" then "plan the work for each repository in its own section, with the API contract between them (endpoints, request and response shapes)."
+                  else "the API contract in the plan is the source of truth." end) +
+                " Each repository that changes gets its own pull request, and the other repositories merge before this one.\n" +
+                ([$extras | split("\n")[] | select(length > 0) | split("\t") | "- " + .[0] + " at " + .[1] + " (from " + .[2] + ")"] | join("\n")) + "\n" else "" end) +
+              (if $browser == "1" then "\n## Seeing the app\nWhen the task is about anything people see, look at the real pages instead of guessing from the code. Skip this section when the task does not touch the user interface.\n" +
+                "- rh-capture opens many pages at once in a real browser, on desktop and phone and in each language its settings list. It saves the screenshots to " + $shots +
+                " and prints a short report: pages wider than the screen, cut-off text, console errors, failed requests, broken images, pages that are not right to left. Run rh-capture --help once to see its settings.\n" +
+                "- Its settings are " + $kit + "/capture.json: the address of the app, how to start it, how to sign in and how to switch language. When the file is missing or wrong, work them out once " +
+                "from package.json, the README and the env examples, write the file and check it with rh-capture --check. The start command runs on a fresh machine, so it installs the dependencies first " +
+                "(for example: npm ci --no-audit --no-fund && npx vite --port 5173). Keep mock data in " + $kit + "/mocks.json. The next run reuses both. " +
+                "Do not change the app files for this (no edits to env files or configs): pass settings on the command line or as environment variables in the start command.\n" +
+                "- Data, the most real source that works first: (a) the preview notes below; (b) a development or staging API the repository already points to, when it answers; " +
+                "(c) the backend in this repository, when it starts quickly on its own; (d) otherwise mocks shaped from the API types and the client code, with full lists, long names " +
+                "and Arabic text where the app has it, never empty pages. Never use production, and keep \"readOnly\": true in the settings so the pages cannot change data.\n" +
+                "- Sign in: " + (if $creds == "1" then "write the test account in the settings as $RH_PREVIEW_USER and $RH_PREVIEW_PASSWORD; rh-capture fills in the real values. Never print or log them."
+                  else "no test account is set, so mock the sign-in API." end) + "\n" +
+                (if $stage == "planning" then "- Before you plan, capture the pages the task touches: rh-capture --phase before --pages \"NAME=/route,NAME2=/route2\" (NAME: a short name per page). " +
+                    "Open the screenshots you need and base the plan on what you saw.\n"
+                  elif $stage == "answer" then "- Capture the pages when it helps you answer.\n"
+                  else "- After your change, capture the same pages with the same names: rh-capture --phase after --pages \"NAME=/route,NAME2=/route2\". Fix what the report and the screenshots show " +
+                    "(layout, overflow, spacing, alignment, contrast, right to left) and capture again until it is right. To review many pages, the checker subagent can look and report back as text.\n" end) +
+                "- A game drawn on a canvas is checked as a game: rh-capture waits for it to draw and says when its screen is one colour. Reach its screens by address (/?scene=shop) or a hook the game reads in development builds.\n" +
+                "- Use the playwright browser tools only to interact with a page (click through a flow, inspect an element); rh-capture covers looking.\n" +
+                "- Keep a short page map in your memory file (route, screen, main component), and stop any process you started before you finish.\n" +
+                (if $app != "" then "\nThe app right now (checked before you started):\n" + $app else "" end) +
+                (if (.browser.notes // "") != "" then "\nPreview notes from the team:\n" + .browser.notes + "\n" else "" end)
+              else "" end) +
+              (if $phone == "1" then "\n## Seeing the phone app\nWhen the task is about anything people see in the phone app, look at it on the phone instead of guessing from the code. Skip this section when the task does not touch its screens.\n" +
+                "- This machine opens " + $phoneon + ".\n" +
+                "- rh-capture --platform phone builds the app, installs it on the phone and opens each screen, by a link into the app or a Maestro flow that taps to it, on the phone (and the tablet) and in each language its settings list. " +
+                "It saves the screenshots to " + $shots + " and prints a short report: the app closing, screens that stay blank or loading, links and flows that failed. Run rh-capture --help once to see its settings (the part on phone apps).\n" +
+                "- Its settings are the phone part of " + $kit + "/capture.json: how to build the app for the simulator, where the built app is, its id, the link base for routes and the sign-in flow. When they are missing or wrong, work them out once " +
+                "from the project (pubspec.yaml, package.json, the Xcode project, build.gradle) and its README, write them and check them with rh-capture --platform phone --check. The build runs on a fresh machine, so it installs what it needs first " +
+                "(the Flutter SDK, the CocoaPods pods, the packages). Keep tap flows in " + $kit + "/flows. The next run reuses both. Do not change the app files for this.\n" +
+                "- A first build takes several minutes: give rh-capture a long time limit (the Bash timeout, up to 1800000 ms). Later builds are quicker, and --no-build reuses the app when the code did not change.\n" +
+                "- Sign in: " + (if $creds == "1" then "write the test account in the sign-in flow as ${RH_PREVIEW_USER} and ${RH_PREVIEW_PASSWORD}; rh-capture fills in the real values. Never print or log them."
+                  else "no test account is set: use a test user the development data of the app has, or show the screens that need no sign-in." end) + "\n" +
+                (if $stage == "planning" then "- Before you plan, capture the screens the task touches: rh-capture --platform phone --phase before --pages \"NAME=/route,NAME2=flows/NAME2.yaml\" (NAME: a short name per screen). " +
+                    "Open the screenshots you need and base the plan on what you saw.\n"
+                  elif $stage == "answer" then "- Capture the screens when it helps you answer.\n"
+                  else "- After your change, capture the same screens with the same names: rh-capture --platform phone --phase after --pages \"NAME=/route,NAME2=flows/NAME2.yaml\". Fix what the report and the screenshots show " +
+                    "(layout, spacing, alignment, contrast, cut-off text, right to left) and capture again until it is right.\n" end) +
+                (if $phonetool == "1" then "- Use the mobile tools only to interact with the app (tap through a flow, type, read what the screen holds); rh-capture covers looking.\n" else "" end) +
+                "- Keep a short screen map in your memory file (route or flow, screen, main view).\n" +
+                (if $phoneapp != "" then "\nThe phone app right now (built and opened before you started):\n" + $phoneapp else "" end)
+              else "" end) +
+              (if $game != "" then "\n## Seeing the game\nThis repository holds a " + $game + " game. When the task is about anything players see, look at the game instead of guessing from the code. Skip this section when the task does not touch what is on screen.\n" +
+                "- What this machine has for it: " + ($games | split("\n") | map(select(length > 0)) | join("; ")) + ".\n" +
+                "- rh-capture --platform game takes the pictures through the picture mode of the game: started with the name of a screen, the game opens it, waits for it to draw, saves a picture and quits. " +
+                "rh-capture runs it per screen, size and language (under a virtual screen where there is no display) and reports pictures that are missing or almost one colour. " +
+                "Run rh-capture --help once: its part on games shows the settings and the few lines that add the picture mode to a Godot or Unity game.\n" +
+                "- Its settings are the game part of " + $kit + "/capture.json: the command that takes one picture, and the build before it. When the game has no picture mode yet, add it (kept out of release builds), " +
+                "write the settings and check them with rh-capture --platform game --check. The build runs on a fresh machine, so it gets the engine first when the machine has none (Godot: the version project.godot names); Unity needs its licence on the machine.\n" +
+                (if $stage == "planning" then "- Before you plan, capture the screens the task touches: rh-capture --platform game --phase before --pages \"NAME=scene,NAME2=scene2\". Open the pictures you need and base the plan on what you saw.\n"
+                  elif $stage == "answer" then "- Capture the screens when it helps you answer.\n"
+                  else "- After your change, capture the same screens with the same names: rh-capture --platform game --phase after --pages \"NAME=scene,NAME2=scene2\". Fix what the pictures show and capture again until it is right.\n" end) +
+                "- Keep a short screen map in your memory file (screen name, scene, what it shows).\n"
+              else "" end) +
+              "\n## Working efficiently\nEach step you take sends this whole conversation again, so a few large steps cost far less than many small ones, with the same result:\n" +
+              "- Put independent commands in one Bash call, read several files in one turn, and make the same change across many files with one script.\n" +
+              "- Send long output to a file and show only what matters, for example: command > /tmp/out.log 2>&1; tail -30 /tmp/out.log\n" +
+              "- Read files with the Read tool (a range of lines for long files) and change them with the Edit tool, rather than rewriting whole files or writing them through shell commands.\n" +
+              "- Do not open a file or a screenshot again unless it changed.\n" +
+              "- To see what earlier runs of this agent tried and what reviewers said, use rh-memory search WORDS, then rh-memory run RUN-KEY.\n" +
+              (if $stage == "coding" or $stage == "revision" then
+                (if .rules.checksBuild then "- Check your work with rh-verify: lint, type check and tests in one call, with a short summary. Do not run the production build: " +
+                    "the checks of the pull request build it, and a failed build comes back to you as a revision.\n"
+                  else "- Check your work with rh-verify: lint, type check and tests in one call, with a short summary. Run rh-verify --build once at the end for the production build.\n" end) +
+                "- For a change across many files, split it: start up to three worker subagents in one message, each with its own files and a short brief " +
+                "(its part of the plan, the files it owns, the decisions made). They work at the same time, each with a small conversation of its own. Then check the whole change yourself.\n"
+              else "" end) +
+              "\n## Rules\n" + ([.rules.safety[] | "- " + .] | join("\n")) +
+              (if (.rules.protectedPaths | length) > 0 then "\n- Protected paths: " + ([.rules.protectedPaths[].pattern] | join(", ")) else "" end) +
+              "\n- Follow the repository conventions in " + (.rules.conventionFiles | join(", ")) + " where they exist." +
+              "\n- Before you finish, update " + $notes + " with what a future run on this repository should know: its structure, where things live, " +
+              "conventions, commands, pitfalls. Keep it short (under 150 lines), current and general — not details of this task.\n"
+            ' "$WORK/context.json"
+          }
+
+          # Claude Code subagents for the editing stages (passed again on every resume: they are not saved with the conversation).
+          agents_json() {
+            jq -nc --arg model "${HELPER_MODEL:-inherit}" '{
+              worker: {
+                description: "Implements one part of a larger change in the files it is given, at the same time as other workers, and reports back briefly.",
+                prompt: "You implement one part of a larger change that the lead agent split up. Change only the files you were given, plus new files your part needs: other workers own the rest. Follow the repository conventions and the brief. Work efficiently: put independent commands in one call, send long output to a file and show only errors or the last lines, read files with Read and change them with Edit. Check your part with rh-verify --no-tests when it helps. Do not commit. Finish with a short report: the files you changed, what you did, and anything the lead must know.",
+                tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+                model: $model
+              },
+              checker: {
+                description: "Looks at pages of the app with rh-capture and reports, as text, what looks wrong on each.",
+                prompt: "You check how the app looks. Run rh-capture with the pages and phase you were given, read its report, and open the screenshots that matter with Read. Report a short list per page: what is wrong (layout, overflow, spacing, alignment, contrast, cut-off text, right to left, empty or broken data) and where on the page. Do not change any files.",
+                tools: ["Read", "Glob", "Grep", "Bash"],
+                model: $model
+              }
+            }'
+          }
+
+          run_agent() {
+            case "$RH_PROVIDER" in
+              claude-code)
+                if [ "$BILLING" = "subscription" ]; then
+                  # Signed in with the Claude subscription's token; an API key would take precedence and be billed, so it's dropped.
+                  unset ANTHROPIC_API_KEY
+                  [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ] || fail "Add the repository secret CLAUDE_CODE_OAUTH_TOKEN (run 'claude setup-token' signed in to the Claude subscription)."
+                else
+                  unset CLAUDE_CODE_OAUTH_TOKEN
+                  [ -n "${ANTHROPIC_API_KEY:-}" ] || fail "Add the repository secret ANTHROPIC_API_KEY (an Anthropic API key)."
+                fi
+                local stamp="$HOME/.cache/releasehub/claude-code.installed"
+                if [ -z "${CLAUDE_READY:-}" ] && { ! command -v claude >/dev/null 2>&1 || [ -z "$(find "$stamp" -mmin -1440 2>/dev/null)" ]; }; then
+                  npm install -g @anthropic-ai/claude-code >/dev/null 2>&1
+                  mkdir -p "$(dirname "$stamp")" && touch "$stamp"
+                fi
+                CLAUDE_READY=1
+                local tools="Read,Glob,Grep" rc=0
+                [ "$2" = "plan" ] || tools="Read,Glob,Grep,Edit,Write,Bash"
+                local resume=()
+                [ -z "$RESUME_ID" ] || resume=(--resume "$RESUME_ID")
+                [ -z "$SESSION_FORK" ] || resume+=(--fork-session)
+                # Notes are kept up to date in every stage (the only file a read-only stage writes).
+                [ "$2" = "plan" ] && tools="Read,Glob,Grep,Edit($NOTES_FILE),Write($NOTES_FILE)"
+                local mcp=() agents=()
+                if [ -n "$BROWSER$PHONE$GAME" ]; then
+                  # Running the app needs Bash even in a read-only stage; whatever it changes is reset after the stage.
+                  [ ! -f "$WORK/mcp.json" ] || mcp=(--mcp-config "$WORK/mcp.json")
+                  [ -z "$BROWSER" ] || tools="$tools,mcp__playwright"
+                  [ -z "$PHONE_TOOL" ] || tools="$tools,mcp__mobile"
+                  [ "$2" != "plan" ] || tools="$tools,Bash,Edit(.releasehub-context/**),Write(.releasehub-context/**)"
+                fi
+                if [ "$2" != "plan" ]; then
+                  # Helpers for large changes, each with a fresh, small conversation: workers on separate files at the same time, and a
+                  # checker that looks at the pages and reports back as text, so the screenshots stay out of the main conversation.
+                  agents=(--agents "$(agents_json)")
+                  tools="$tools,Agent"
+                fi
+                local dirs=() name dir base
+                while IFS=$'\t' read -r name dir base; do dirs+=(--add-dir "$dir"); done < "$WORK/extras.txt"
+                # Empty lists expand to nothing (bash 3.2, on the hosted Macs, calls them unset otherwise).
+                local args=(--output-format json --allowedTools "$tools" --permission-mode acceptEdits ${mcp[@]+"${mcp[@]}"} ${agents[@]+"${agents[@]}"} ${dirs[@]+"${dirs[@]}"})
+                if [ -n "${MODEL:-}" ]; then args+=(--model "$MODEL"); fi
+
+                # The agent needs neither ReleaseHub's runner secret nor the code host's token: the runner signs and pushes for it.
+                # A phone app's or a game's first build takes minutes: the agent may give a command up to 30 minutes.
+                local long="$PHONE$GAME"
+                env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN MAX_MCP_OUTPUT_TOKENS=12000 ${long:+BASH_MAX_TIMEOUT_MS=1800000} \
+                  claude -p "$(cat "$1")" ${resume[@]+"${resume[@]}"} "${args[@]}" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
+                if [ "$rc" -ne 0 ] && [ -n "$RESUME_ID" ] && grep -Eqi 'no conversation found|session' "$WORK/err.txt" "$WORK/out.json" 2>/dev/null; then
+                  # The earlier conversation couldn't be continued here: start fresh with the full prompt.
+                  log "Couldn't continue the earlier conversation; starting a new one." warning
+                  rc=0
+                  env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN MAX_MCP_OUTPUT_TOKENS=12000 ${long:+BASH_MAX_TIMEOUT_MS=1800000} \
+                    claude -p "$(cat "$1")" "${args[@]}" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
+                fi
+                # Every model the stage used, subagents included (modelUsage); usage alone covers only the main conversation.
+                USAGE=$(jq -c '(.modelUsage // {} | to_entries | map(.value)) as $m
+                  | (if ($m | length) > 0
+                      then {fresh: ($m | map(.inputTokens // 0) | add), read: ($m | map(.cacheReadInputTokens // 0) | add),
+                            write: ($m | map(.cacheCreationInputTokens // 0) | add), out: ($m | map(.outputTokens // 0) | add)}
+                      else {fresh: (.usage.input_tokens // 0), read: (.usage.cache_read_input_tokens // 0),
+                            write: (.usage.cache_creation_input_tokens // 0), out: (.usage.output_tokens // 0)} end) as $t
+                  | {inputTokens: ($t.fresh + $t.read + $t.write), cachedTokens: $t.read, cacheWriteTokens: $t.write, outputTokens: $t.out,
+                     modelCalls: .num_turns, durationMs: .duration_ms, costUsd: .total_cost_usd, source: "claude-code", ref: .session_id}' "$WORK/out.json" 2>/dev/null || echo null)
+                [ -n "$USAGE" ] || USAGE='null'
+                if [ "$rc" -ne 0 ] || [ "$(jq -r '.is_error // false' "$WORK/out.json" 2>/dev/null || echo true)" = "true" ]; then
+                  jq -r '.result // empty' "$WORK/out.json" > "$WORK/said.txt" 2>/dev/null || cp "$WORK/out.json" "$WORK/said.txt"
+                  if said "$WORK/said.txt" "$WORK/err.txt" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/said.txt" "$WORK/err.txt")"; fi
+                  fail "Claude Code stopped with an error: $(said "$WORK/said.txt" "$WORK/err.txt" | tail -c 300)"
+                fi
+                jq -r '.result // ""' "$WORK/out.json" > "$WORK/result.txt"
+                ;;
+              codex)
+                npm install -g @openai/codex >/dev/null 2>&1
+                export CODEX_API_KEY="${OPENAI_API_KEY:-}"
+                local sandbox="read-only"
+                [ "$2" = "plan" ] || sandbox="workspace-write"
+                local rc=0 cargs=(exec --json --sandbox "$sandbox")
+                # The model ReleaseHub's Codex role names (empty: Codex picks its own).
+                if [ -n "${MODEL:-}" ]; then cargs+=(--model "$MODEL"); fi
+                codex "${cargs[@]}" "$(cat "$1")" > "$WORK/out.jsonl" 2> "$WORK/err.txt" || rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  if said "$WORK/err.txt" "$WORK/out.jsonl" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/err.txt")"; fi
+                  fail "Codex stopped with an error: $(said "$WORK/err.txt" | tail -c 300)"
+                fi
+                jq -rs '[.[] | select(.type == "item.completed" and .item.type == "agent_message") | .item.text] | last // ""' "$WORK/out.jsonl" > "$WORK/result.txt"
+                USAGE=$(jq -cs '{inputTokens: ([.[] | select(.type == "turn.completed") | .usage.input_tokens // 0] | add // 0),
+                  outputTokens: ([.[] | select(.type == "turn.completed") | .usage.output_tokens // 0] | add // 0),
+                  costUsd: null, source: "codex", ref: ([.[] | select(.type == "thread.started") | .thread_id] | first)}' "$WORK/out.jsonl")
+                ;;
+              copilot)
+                npm install -g @github/copilot >/dev/null 2>&1
+                local rc=0
+                copilot -p "$(cat "$1")" --allow-all-tools > "$WORK/result.txt" 2> "$WORK/err.txt" || rc=$?
+                if [ "$rc" -ne 0 ]; then
+                  if said "$WORK/err.txt" "$WORK/result.txt" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/err.txt" "$WORK/result.txt")"; fi
+                  fail "Copilot stopped with an error: $(said "$WORK/err.txt" | tail -c 300)"
+                fi
+                USAGE='{"inputTokens": 0, "outputTokens": 0, "costUsd": null, "source": "copilot", "ref": null}'
+                ;;
+              *)
+                fail "Unknown provider '$RH_PROVIDER'."
+                ;;
+            esac
+          }
+
+          open_pr() {
+            local num url files body
+            body=$(printf 'Opened by ReleaseHub agent run %s.' "$KEY")
+            [ -z "$RUN_LINK" ] || body=$(printf '%s\n\n%s' "$body" "$RUN_LINK")
+            if [ -n "${GITHUB_RUN_ID:-}" ]; then
+              num=$(gh pr list --head "$RH_BRANCH" --state open --json number --jq '.[0].number // empty')
+              if [ -z "$num" ]; then
+                gh pr create --base "$TARGET" --head "$RH_BRANCH" --title "$1" --body "$body" >/dev/null 2>"$WORK/pr-err.txt" \
+                  || { FAILING=1; fail "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"; }
+                num=$(gh pr list --head "$RH_BRANCH" --state open --json number --jq '.[0].number')
+              fi
+              url=$(gh pr view "$num" --json url --jq .url)
+            else
+              az extension add -n azure-devops --only-show-errors >/dev/null 2>&1 || true
+              export AZURE_DEVOPS_EXT_PAT="$SYSTEM_ACCESSTOKEN"
+              num=$(az repos pr list --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$BUILD_REPOSITORY_NAME" \
+                --source-branch "$RH_BRANCH" --status active --query "[0].pullRequestId" -o tsv)
+              if [ -z "$num" ]; then
+                num=$(az repos pr create --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$BUILD_REPOSITORY_NAME" \
+                  --source-branch "$RH_BRANCH" --target-branch "$TARGET" --title "$1" --description "$body" --query pullRequestId -o tsv 2>"$WORK/pr-err.txt") \
+                  || { FAILING=1; fail "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"; }
+              fi
+              url="${SYSTEM_COLLECTIONURI}${SYSTEM_TEAMPROJECT}/_git/${BUILD_REPOSITORY_NAME}/pullrequest/$num"
+            fi
+            files=$(git diff --name-only "origin/$RH_BASE...HEAD" | jq -R . | jq -sc .)
+            # The change itself (cut at 150 KB), for a second opinion when the workspace asks another model to read it.
+            git diff "origin/$RH_BASE...HEAD" 2>/dev/null | head -c 150000 > "$WORK/change.diff" || : > "$WORK/change.diff"
+            post "$(jq -nc --argjson n "$num" --arg url "$url" --arg sha "$(git rev-parse HEAD)" --argjson f "$files" --argjson u "$USAGE" \
+              --slurpfile x "$WORK/extra-prs.json" --argjson w "$(keep_waiting)" --rawfile diff "$WORK/change.diff" \
+              '{type: "code", pullRequest: {number: $n, url: $url, headSha: $sha}, changedFiles: $f, usage: $u, pullRequests: $x[0], waiting: $w, diff: $diff}')"
+          }
+
+          # One stage: plan, answer, change (or revise) or revert, and report the result.
+          run_stage() {
+            USAGE='null'
+            echo '[]' > "$WORK/extra-prs.json"
+            case "$RH_STAGE" in
+              planning)
+                log "Reading the repository and planning."
+                prepare
+                run_agent "$WORK/prompt.md" plan
+                wrap_up
+                git reset --hard -q && git clean -fdq
+                [ -s "$WORK/result.txt" ] || fail "The agent returned an empty plan."
+                post "$(jq -nc --rawfile p "$WORK/result.txt" --argjson u "$USAGE" --argjson w "$(keep_waiting)" '{type: "plan", plan: $p, usage: $u, waiting: $w}')"
+                ;;
+              answer)
+                log "Reading the repository to answer the question."
+                # Discussing a change: read its branch (when it has been pushed).
+                if git ls-remote --exit-code --heads origin "$RH_BRANCH" >/dev/null 2>&1; then
+                  git fetch -q origin "$RH_BRANCH" && git checkout -q -B "$RH_BRANCH" "origin/$RH_BRANCH"
+                fi
+                prepare
+                run_agent "$WORK/prompt.md" plan
+                wrap_up
+                git reset --hard -q && git clean -fdq
+                [ -s "$WORK/result.txt" ] || fail "The agent returned an empty answer."
+                post "$(jq -nc --rawfile a "$WORK/result.txt" --argjson u "$USAGE" '{type: "answer", answer: $a, usage: $u}')"
+                ;;
+              coding|revision)
+                if git ls-remote --exit-code --heads origin "$RH_BRANCH" >/dev/null 2>&1; then
+                  git fetch -q origin "$RH_BRANCH"
+                  git checkout -q -B "$RH_BRANCH" "origin/$RH_BRANCH"
+                else
+                  git checkout -q -b "$RH_BRANCH"
+                fi
+                log "Working on $RH_BRANCH."
+                if [ "$(jq -r '(.prototype.files // []) | length' "$WORK/context.json")" -gt 0 ] && [ -z "$(git log --oneline "origin/$RH_BASE..HEAD" 2>/dev/null)" ]; then
+                  # A prototype run starts from the approved prototype's files.
+                  jq -c '.prototype.files[]' "$WORK/context.json" | while read -r file; do
+                    path=$(jq -r '.path' <<<"$file")
+                    case "$path" in /*|*..*) continue ;; esac
+                    mkdir -p "$(dirname "$path")"
+                    jq -r '.content' <<<"$file" > "$path"
+                  done
+                  git add -A
+                  git commit -q -m "$KEY: start from the approved prototype" || true
+                  log "Added the approved prototype's files."
+                fi
+                prepare
+                run_agent "$WORK/prompt.md" edit
+                wrap_up
+                git add -A
+                if git diff --cached --quiet; then
+                  local others
+                  others=$(extras_changed)
+                  [ -n "$others" ] || fail "The agent finished without changing any files."
+                  # A first change has to touch this repository too: its pipeline and the run's main pull request live here.
+                  git rev-parse -q --verify "origin/$RH_BRANCH" >/dev/null \
+                    || fail "The agent changed only $others. A run needs a change in this repository, where its pipeline runs: start the run on $others instead, or ask for a change here too."
+                else
+                  git commit -q -m "$KEY: $TITLE" -m "Made by a ReleaseHub agent run."
+                  push_branch
+                  log "Pushed $(git rev-parse --short HEAD) to $RH_BRANCH."
+                fi
+                push_extras
+                open_pr "$KEY: $TITLE"
+                ;;
+              revert)
+                SHA=$(jq -r '.revert.commit // empty' "$WORK/context.json")
+                [ -n "$SHA" ] || fail "Nothing to revert: the merge commit is unknown."
+                git checkout -q -b "$RH_BRANCH"
+                if [ "$(git rev-list --parents -n 1 "$SHA" | wc -w)" -gt 2 ]; then
+                  git revert --no-edit -m 1 "$SHA" || fail "The merge can't be reverted cleanly; revert it by hand."
+                else
+                  git revert --no-edit "$SHA" || fail "The commit can't be reverted cleanly; revert it by hand."
+                fi
+                push_branch
+                USAGE='{"inputTokens": 0, "outputTokens": 0, "costUsd": 0, "source": "git", "ref": null}'
+                open_pr "$TITLE"
+                ;;
+              *)
+                fail "Unknown stage '$RH_STAGE'."
+                ;;
+            esac
+          }
+
+          # After a plan or a pull request the job stays up for the next decision (as long as the agent's settings say): when it comes in
+          # time, ReleaseHub hands the next stage to this job, which goes on here without a new job and with the app still running.
+          JOB_STARTED=$SECONDS
+          keep_minutes() {
+            local minutes limit
+            minutes=$(jq -r '.run.keepMinutes // 0' "$WORK/context.json")
+            limit=$(jq -r '.run.jobMinutes // 40' "$WORK/context.json")
+            case "$RH_STAGE" in planning|coding|revision) ;; *) echo 0; return ;; esac
+            # A hosted job has a time limit: one that has already run long takes no further stage.
+            if [ "$((SECONDS - JOB_STARTED))" -ge "$((limit * 60))" ]; then echo 0; else echo "$minutes"; fi
+          }
+          keep_waiting() { if [ "$(keep_minutes)" -gt 0 ]; then echo true; else echo false; fi; }
+
+          wait_for_next() {
+            local minutes until code ts sig
+            minutes=$(keep_minutes)
+            [ "$minutes" -gt 0 ] || return 1
+            until=$((SECONDS + minutes * 60))
+            log "Waiting up to $minutes minutes for the next decision, so the next stage can start here without a new job."
+            while [ "$SECONDS" -lt "$until" ]; do
+              read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.next")"
+              code=$(curl -sS -m 70 -o "$WORK/next.json" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/next?dispatch=$RH_DISPATCH&wait=40" \
+                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              case "$code" in
+                200) take_next; return 0 ;;
+                204) ;;
+                000|5*) sleep 5 ;;
+                *) return 1 ;;
+              esac
+            done
+            # Time is up. A stage handed over at the last moment still comes back here.
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.next")"
+            code=$(curl -sS -m 30 -X POST -o "$WORK/next.json" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/next?dispatch=$RH_DISPATCH" \
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+            if [ "$code" = "200" ]; then take_next; return 0; fi
+            return 1
+          }
+
+          take_next() {
+            RH_DISPATCH=$(jq -r '.dispatch' "$WORK/next.json")
+            RH_STAGE=$(jq -r '.stage' "$WORK/next.json")
+            fetch_context
+          }
+
+          git config user.name "ReleaseHub agent"
+          git config user.email "agent@users.noreply.releasehub.app"
+          trap stop_app EXIT
+
+          while :; do
+            post "{\"type\": \"started\", \"runner\": \"$RH_SCRIPT_VERSION\"}"
+            run_stage
+            wait_for_next || break
+          done
+          RELEASEHUB
+          bash "$RUNNER_TEMP/releasehub-agent.sh"
