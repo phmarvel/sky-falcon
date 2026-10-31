@@ -1,5 +1,7 @@
 import Phaser from 'phaser';
 import { COLORS, GAME_HEIGHT, GAME_WIDTH } from './constants';
+import { getLangStore } from './i18n/langStore';
+import { applyPageLang } from './i18n/pageLang';
 import { fitOnResize } from './fitOnResize';
 import { FlightScene } from './scenes/FlightScene';
 import { StartScene } from './scenes/StartScene';
@@ -34,6 +36,7 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
 }
 
 export function createGame(parent: string | HTMLElement): Phaser.Game {
+  applyPageLang(getLangStore().get());
   const game = new Phaser.Game(createGameConfig(parent));
   fitOnResize(game);
   // A hook for the browser tests; harmless to players.

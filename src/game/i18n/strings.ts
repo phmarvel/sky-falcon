@@ -4,11 +4,13 @@ export const STRINGS = {
     title: 'Sky Falcon',
     bestScore: 'Best score',
     play: 'Play',
+    switchLanguage: 'العربية',
   },
   ar: {
     title: 'صقر السماء',
     bestScore: 'أفضل نتيجة',
     play: 'العب',
+    switchLanguage: 'English',
   },
 } as const;
 
@@ -31,4 +33,9 @@ export function formatNumber(n: number, lang: Lang): string {
 /** Reading direction of a language. */
 export function directionOf(lang: Lang): 'ltr' | 'rtl' {
   return lang === 'ar' ? 'rtl' : 'ltr';
+}
+
+/** The other language, for the switch. */
+export function otherLang(lang: Lang): Lang {
+  return lang === 'ar' ? 'en' : 'ar';
 }

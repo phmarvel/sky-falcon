@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { STRINGS, type Lang, directionOf, formatNumber, t } from '../../src/game/i18n/strings';
+import { STRINGS, type Lang, directionOf, formatNumber, otherLang, t } from '../../src/game/i18n/strings';
 
 describe('strings', () => {
   it('has the same non-empty keys in English and Arabic', () => {
@@ -21,5 +21,10 @@ describe('strings', () => {
     expect(formatNumber(42, 'ar')).toBe('٤٢');
     expect(directionOf('ar')).toBe('rtl');
     expect(directionOf('en')).toBe('ltr');
+  });
+
+  it('gives the other language', () => {
+    expect(otherLang('en')).toBe('ar');
+    expect(otherLang('ar')).toBe('en');
   });
 });
