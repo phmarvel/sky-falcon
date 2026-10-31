@@ -84,7 +84,7 @@ jobs:
           #!/usr/bin/env bash
           # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
           set -euo pipefail
-          RH_SCRIPT_VERSION="45933c145367"
+          RH_SCRIPT_VERSION="568f5472b3da"
           API="${RH_API%/}"
           EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
           WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
@@ -132,9 +132,11 @@ jobs:
               '. + {eventId: $id, dispatch: $d, externalRunId: $rid, externalRunUrl: $url}
                | if (.type == "plan" or .type == "code" or .type == "answer") and $notes != "" then . + {notes: $notes} else . end' <<<"$1")
             read -r ts sig <<<"$(sign "$body")"
+            # From a file: Linux takes at most 128 KB in one argument, and a change's report carries its diff (up to 150 KB).
+            printf '%s' "$body" > "$WORK/event.json"
             code=$(curl -sS --retry 3 --retry-all-errors -o "$WORK/answer.json" -w '%{http_code}' -X POST "$EVENTS" \
               -H 'Content-Type: application/json' -H "tenant: $RH_TENANT" \
-              -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" --data-binary "$body" || echo 000)
+              -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" --data-binary "@$WORK/event.json" || echo 000)
             if [ "$code" = "409" ] || [ "$code" = "410" ]; then
               echo "ReleaseHub: $(cat "$WORK/answer.json" 2>/dev/null)"
               echo "The run moved on; stopping."
@@ -2462,17 +2464,18 @@ jobs:
                 local args=(--output-format json --allowedTools "$tools" --permission-mode acceptEdits ${mcp[@]+"${mcp[@]}"} ${agents[@]+"${agents[@]}"} ${dirs[@]+"${dirs[@]}"})
                 if [ -n "${MODEL:-}" ]; then args+=(--model "$MODEL"); fi
 
-                # The agent needs neither ReleaseHub's runner secret nor the code host's token: the runner signs and pushes for it.
+                # The agent needs neither ReleaseHub's runner secret nor the code host's token: the runner signs and pushes for it. The
+                # prompt goes on stdin (one argument may hold at most 128 KB on Linux).
                 # A phone app's or a game's first build takes minutes: the agent may give a command up to 30 minutes.
                 local long="$PHONE$GAME"
                 env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN MAX_MCP_OUTPUT_TOKENS=12000 ${long:+BASH_MAX_TIMEOUT_MS=1800000} \
-                  claude -p "$(cat "$1")" ${resume[@]+"${resume[@]}"} "${args[@]}" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
+                  claude -p ${resume[@]+"${resume[@]}"} "${args[@]}" < "$1" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
                 if [ "$rc" -ne 0 ] && [ -n "$RESUME_ID" ] && grep -Eqi 'no conversation found|session' "$WORK/err.txt" "$WORK/out.json" 2>/dev/null; then
                   # The earlier conversation couldn't be continued here: start fresh with the full prompt.
                   log "Couldn't continue the earlier conversation; starting a new one." warning
                   rc=0
                   env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN MAX_MCP_OUTPUT_TOKENS=12000 ${long:+BASH_MAX_TIMEOUT_MS=1800000} \
-                    claude -p "$(cat "$1")" "${args[@]}" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
+                    claude -p "${args[@]}" < "$1" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
                 fi
                 # Every model the stage used, subagents included (modelUsage); usage alone covers only the main conversation.
                 USAGE=$(jq -c '(.modelUsage // {} | to_entries | map(.value)) as $m
@@ -2557,7 +2560,7 @@ jobs:
             fi
             files=$(git diff --name-only "origin/$RH_BASE...HEAD" | jq -R . | jq -sc .)
             # The change itself (cut at 150 KB), for a second opinion when the workspace asks another model to read it.
-            git diff "origin/$RH_BASE...HEAD" 2>/dev/null | head -c 150000 > "$WORK/change.diff" || : > "$WORK/change.diff"
+            { git diff "origin/$RH_BASE...HEAD" 2>/dev/null || true; } | head -c 150000 > "$WORK/change.diff" || : > "$WORK/change.diff"
             post "$(jq -nc --argjson n "$num" --arg url "$url" --arg sha "$(git rev-parse HEAD)" --argjson f "$files" --argjson u "$USAGE" \
               --slurpfile x "$WORK/extra-prs.json" --argjson w "$(keep_waiting)" --rawfile diff "$WORK/change.diff" --slurpfile needs "$WORK/needs.out" \
               '{type: "code", pullRequest: {number: $n, url: $url, headSha: $sha}, changedFiles: $f, usage: $u, pullRequests: $x[0], waiting: $w, diff: $diff, needs: $needs[0]}')"
@@ -2619,10 +2622,16 @@ jobs:
                 if git diff --cached --quiet; then
                   local others
                   others=$(extras_changed)
-                  [ -n "$others" ] || fail "The agent finished without changing any files."
-                  # A first change has to touch this repository too: its pipeline and the run's main pull request live here.
-                  git rev-parse -q --verify "origin/$RH_BRANCH" >/dev/null \
-                    || fail "The agent changed only $others. A run needs a change in this repository, where its pipeline runs: start the run on $others instead, or ask for a change here too."
+                  if [ -z "$others" ]; then
+                    # The first change was pushed by an earlier try of this stage, whose report didn't reach ReleaseHub: report it now.
+                    [ "$RH_STAGE" = "coding" ] && [ -n "$(git log --oneline "origin/$RH_BASE..HEAD" 2>/dev/null)" ] \
+                      || fail "The agent finished without changing any files."
+                    log "Nothing new to change: reporting the change pushed earlier to $RH_BRANCH."
+                  else
+                    # A first change has to touch this repository too: its pipeline and the run's main pull request live here.
+                    git rev-parse -q --verify "origin/$RH_BRANCH" >/dev/null \
+                      || fail "The agent changed only $others. A run needs a change in this repository, where its pipeline runs: start the run on $others instead, or ask for a change here too."
+                  fi
                 else
                   git commit -q -m "$KEY: $TITLE" -m "Made by a ReleaseHub agent run."
                   push_branch
@@ -2700,7 +2709,19 @@ jobs:
             AUTH=$(git_auth)
             git config "${AUTH%%=*}" "${AUTH#*=}"
           fi
-          trap stop_app EXIT
+          # The last word when the runner stops on something its steps didn't report: a command failing inside a function exits without
+          # the ERR trap, and ReleaseHub then only found the workflow ended without a report.
+          on_exit() {
+            local rc=$? last="${BASH_COMMAND:0:160}" body
+            stop_app || true
+            if [ "$rc" -ne 0 ] && [ -z "$FAILING" ]; then
+              FAILING=1
+              body=$(jq -nc --arg m "The runner stopped unexpectedly (exit $rc, at: $last); see the workflow log." --argjson u "${USAGE:-null}" \
+                '{type: "failed", message: $m, usage: $u}' 2>/dev/null || jq -nc --arg m "The runner stopped unexpectedly (exit $rc); see the workflow log." '{type: "failed", message: $m}')
+              post "$body" || true
+            fi
+          }
+          trap on_exit EXIT
 
           while :; do
             post "{\"type\": \"started\", \"runner\": \"$RH_SCRIPT_VERSION\"}"
