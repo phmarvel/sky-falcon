@@ -1,7 +1,7 @@
 import Phaser from 'phaser';
 import { COLORS, GAME_HEIGHT, GAME_WIDTH } from './constants';
 import { fitOnResize } from './fitOnResize';
-import { DesertScene } from './scenes/DesertScene';
+import { FlightScene } from './scenes/FlightScene';
 
 export { COLORS, GAME_HEIGHT, GAME_WIDTH };
 
@@ -24,7 +24,7 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
       height: GAME_HEIGHT,
     },
     render: { antialias: true },
-    scene: [DesertScene],
+    scene: [FlightScene],
   };
 }
 
