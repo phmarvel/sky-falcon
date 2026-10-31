@@ -48,9 +48,10 @@ test.beforeEach(async ({ page, browserName }) => {
   }
 });
 
+/** Opens the flight directly (`?scene=flight`, skipping the start screen) with the obstacles of `seed`. */
 async function openGame(page: Page, seed: number) {
-  await page.goto(`./?seed=${seed}`);
-  await expect(page.locator('#game canvas')).toBeVisible();
+  await page.goto(`./?scene=flight&seed=${seed}`);
+  await expect(page.locator('#game canvas').first()).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,
   });
@@ -66,6 +67,7 @@ function play(page: Page, steer: 'gap' | 'high', passed: number, maxGameSeconds:
   return page.evaluate(
     ({ steer, passed, maxGameSeconds, falconX, radius }) =>
       new Promise<Frame[]>((resolve) => {
+        // The first canvas is the game's; Phaser may add text-measuring canvases after it.
         const canvas = document.querySelector('#game canvas')!;
         const box = canvas.getBoundingClientRect();
         const at = { clientX: box.left + 20, clientY: box.top + 20, button: 0, bubbles: true };
@@ -199,10 +201,37 @@ test('touching a tower or a palm tree ends the run at once', async ({ page }, te
 
   // Everything stops: the obstacles freeze and the falcon ignores input.
   const obstacles = await page.evaluate(() => window.__SKY_FALCON__!.registry.get('obstacles'));
-  await page.locator('#game canvas').click({ position: { x: 40, y: 40 } });
+  await page.locator('#game canvas').first().click({ position: { x: 40, y: 40 } });
   await page.keyboard.press('Space');
-  if (testInfo.project.use.hasTouch) await page.locator('#game canvas').tap({ position: { x: 40, y: 40 } });
+  if (testInfo.project.use.hasTouch) await page.locator('#game canvas').first().tap({ position: { x: 40, y: 40 } });
   await page.waitForTimeout(300);
   expect(await page.evaluate(() => window.__SKY_FALCON__!.registry.get('obstacles'))).toEqual(obstacles);
   expect(await page.evaluate(() => window.__SKY_FALCON__!.registry.get('falcon'))).toEqual(falcon);
+});
+
+test('the start screen shows no obstacles, and Play starts a run that sends them', async ({ page }) => {
+  await page.goto('./?seed=7');
+  await expect(page.locator('#game canvas').first()).toBeVisible();
+  await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, { timeout: 60_000 });
+  const reg = <T>(key: string) => page.evaluate((k) => window.__SKY_FALCON__!.registry.get(k) as T, key);
+  expect(await reg('screen')).toBe('start');
+  expect(await reg('obstacles')).toBeUndefined();
+  expect(await reg('obstaclesDrawn')).toBeUndefined();
+
+  // Press Play on the start screen.
+  const ui = await reg<{ x: number; y: number }>('startUi');
+  const box = (await page.locator('#game canvas').first().boundingBox())!;
+  await page.mouse.click(box.x + (ui.x / GAME_WIDTH) * box.width, box.y + (ui.y / 960) * box.height);
+  await page.waitForFunction(
+    () => window.__SKY_FALCON__?.registry.get('screen') === 'flight' && window.__SKY_FALCON__?.registry.get('ready'),
+    undefined,
+    { timeout: 60_000 },
+  );
+  // The falcon waits for its first flap, with no obstacles yet; then they come.
+  expect(await reg('obstacles')).toEqual([]);
+  const frames = await play(page, 'gap', 2, 20);
+  const last = frames.at(-1)!;
+  expect(last.runOver).toBe(false);
+  expect(last.passed).toBeGreaterThanOrEqual(2);
+  expect(byId(frames).size).toBeGreaterThanOrEqual(3);
 });

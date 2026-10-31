@@ -28,4 +28,16 @@ export const COLORS = {
   palmTrunkRing: 0x5e3a1a,
   palmLeaf: 0x3f9a4a,
   palmLeafDark: 0x2a6e35,
+  button: 0x2f7d4f,
+  buttonEdge: 0x1c4f32,
+} as const;
+
+/** Text styles for the screens. */
+export const UI = {
+  fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',
+  title: '#fff4d6',
+  titleStroke: '#3a2414',
+  bestText: '#fff4d6',
+  buttonText: '#ffffff',
+  switchText: '#fff4d6',
 } as const;

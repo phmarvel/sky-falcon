@@ -76,6 +76,9 @@ export class FlightScene extends Phaser.Scene {
     }
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.stopInput());
 
+    this.registry.set('ready', false);
+    this.registry.set('screen', 'flight');
+    this.registry.set('score', 0);
     this.registry.set('runOver', false);
     this.registry.set('runOverReason', null);
     this.publish();
