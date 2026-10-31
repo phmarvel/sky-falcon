@@ -20,6 +20,14 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 
+/* Screens taller than 9:16 (most phones): the space sits above and below the centred canvas, so extend its top sky upwards
+   and its sand downwards instead, with no seam at either edge. */
+@media (max-aspect-ratio: 9/16) {
+  body {
+    background: linear-gradient(#3b6ea5 50%, #e3b261 50%);
+  }
+}
+
 #game canvas {
   display: block;
 }
