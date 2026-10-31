@@ -25,9 +25,19 @@ export function t(lang: Lang, key: StringKey): string {
   return table[key] ?? STRINGS.en[key];
 }
 
-/** A number as the player reads it: Arabic-Indic digits for Arabic. */
+const NUMBER_FORMATS = {
+  en: new Intl.NumberFormat('en-US', { numberingSystem: 'latn', useGrouping: false, maximumFractionDigits: 0 }),
+  ar: new Intl.NumberFormat('ar-EG', { numberingSystem: 'arab', useGrouping: false, maximumFractionDigits: 0 }),
+};
+
+/**
+ * A number as the player reads it: Arabic-Indic digits (٠١٢٣٤٥٦٧٨٩) for Arabic, Western digits for English.
+ * EVERY number the game shows must go through here with the current language.
+ * Not a whole number >= 0 (NaN, infinity, negative) shows as 0; a fraction is rounded down.
+ */
 export function formatNumber(n: number, lang: Lang): string {
-  return new Intl.NumberFormat(lang === 'ar' ? 'ar-EG' : 'en-US', { useGrouping: false }).format(n);
+  const whole = Number.isFinite(n) && n > 0 ? Math.floor(n) : 0;
+  return (NUMBER_FORMATS[lang] ?? NUMBER_FORMATS.en).format(whole);
 }
 
 /** Reading direction of a language. */

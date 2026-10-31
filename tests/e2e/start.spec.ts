@@ -200,3 +200,52 @@ test('?lang=ar opens in Arabic', async ({ page }) => {
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, { timeout: 60_000 });
   expect(await reg(page, 'lang')).toBe('ar');
 });
+
+const WESTERN = /[0-9]/;
+const ARABIC_INDIC = /[٠-٩]/;
+
+test('the best score uses the digits of the chosen language, also after switching', async ({ page }) => {
+  await openStart(page, '42');
+  let texts = await reg<Texts>(page, 'startTexts');
+  expect(texts.bestScore).toContain('42');
+  expect(texts.bestScore).not.toMatch(ARABIC_INDIC);
+
+  await clickSwitch(page);
+  await waitLang(page, 'ar');
+  texts = await reg<Texts>(page, 'startTexts');
+  expect(texts.bestScore).toContain('٤٢');
+  expect(texts.bestScore).not.toMatch(WESTERN);
+
+  await clickSwitch(page);
+  await waitLang(page, 'en');
+  texts = await reg<Texts>(page, 'startTexts');
+  expect(texts.bestScore).toContain('42');
+  expect(texts.bestScore).not.toMatch(ARABIC_INDIC);
+});
+
+test('with no saved score the best score is 0 in English and ٠ in Arabic', async ({ page }) => {
+  await openStart(page);
+  expect((await reg<Texts>(page, 'startTexts')).bestScore).toBe('Best score: 0');
+  await clickSwitch(page);
+  await waitLang(page, 'ar');
+  const ar = (await reg<Texts>(page, 'startTexts')).bestScore;
+  expect(ar).toContain('٠');
+  expect(ar).not.toMatch(WESTERN);
+});
+
+test('the language switch is at least 44 px tall on screen and clear of the title', async ({ page }) => {
+  await openStart(page);
+  const box = (await page.locator('#game canvas').first().boundingBox())!;
+  for (const lang of ['en', 'ar']) {
+    if (lang === 'ar') {
+      await clickSwitch(page);
+      await waitLang(page, 'ar');
+    }
+    const ui = await reg<Ui>(page, 'langUi');
+    expect(ui.height * (box.height / 960)).toBeGreaterThanOrEqual(44);
+    expect(ui.x - ui.width / 2).toBeGreaterThanOrEqual(0);
+    expect(ui.x + ui.width / 2).toBeLessThanOrEqual(540);
+    // The title is centred at y=190 with a 72 px font: its top is about y=150.
+    expect(ui.y + ui.height / 2).toBeLessThan(150);
+  }
+});

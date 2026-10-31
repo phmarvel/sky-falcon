@@ -10,7 +10,7 @@ import { type Lang, directionOf, formatNumber, otherLang, t } from '../i18n/stri
 import { getBestScoreStore } from '../score/bestScore';
 
 const BUTTON = { x: GAME_WIDTH / 2, y: 610, width: 240, height: 84 };
-const SWITCH = { width: 150, height: 56, y: 60, margin: 20 };
+const SWITCH = { width: 160, height: 72, y: 60, margin: 20 };
 
 /** The language switch sits in the top corner at the end of the reading direction's start: right for LTR, left for RTL. */
 function switchUi(lang: Lang) {

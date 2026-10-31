@@ -23,6 +23,25 @@ describe('strings', () => {
     expect(directionOf('en')).toBe('ltr');
   });
 
+  it('writes every digit in Arabic-Indic form in Arabic and Western in English', () => {
+    expect(formatNumber(12, 'ar')).toBe('١٢');
+    expect(formatNumber(0, 'ar')).toBe('٠');
+    expect(formatNumber(1234, 'ar')).toBe('١٢٣٤');
+    expect(formatNumber(1234567890, 'ar')).toBe('١٢٣٤٥٦٧٨٩٠');
+    expect(formatNumber(12, 'en')).toBe('12');
+    expect(formatNumber(1234, 'en')).toBe('1234');
+  });
+
+  it('shows 0 for bad numbers and rounds fractions down', () => {
+    for (const lang of ['en', 'ar'] as const) {
+      expect(formatNumber(NaN, lang)).toBe(formatNumber(0, lang));
+      expect(formatNumber(-5, lang)).toBe(formatNumber(0, lang));
+      expect(formatNumber(Infinity, lang)).toBe(formatNumber(0, lang));
+      expect(formatNumber(3.7, lang)).toBe(formatNumber(3, lang));
+    }
+    expect(formatNumber(3.7, 'ar')).toBe('٣');
+  });
+
   it('gives the other language', () => {
     expect(otherLang('en')).toBe('ar');
     expect(otherLang('ar')).toBe('en');
