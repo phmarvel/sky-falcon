@@ -20,6 +20,7 @@ import { getLangStore } from "../i18n/langStore";
 import { getBestScoreStore } from "../score/bestScore";
 import { type ScoreView, createScoreView } from "../score/drawScore";
 import { scoreOf } from "../score/runScore";
+import { scrollSpeedOf, speedLevelOf } from "../score/speedUp";
 import { showGameOver } from "../ui/GameOverScreen";
 import { autopilotWantsFlap } from "../run/autopilot";
 import {
@@ -199,6 +200,8 @@ export class FlightScene extends Phaser.Scene {
     this.scoreView.set(score);
     this.registry.set("score", score);
     this.registry.set("scoreText", this.scoreView.text());
+    this.registry.set("speedLevel", speedLevelOf(score));
+    this.registry.set("scrollSpeed", scrollSpeedOf(score));
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
   }
 }

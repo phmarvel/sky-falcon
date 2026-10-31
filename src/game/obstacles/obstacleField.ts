@@ -6,7 +6,7 @@ import { randomStep } from './random';
  * Pure: no Phaser, so it can be tested on its own. Units are game pixels and game seconds.
  */
 export const OBSTACLES = {
-  /** How fast every obstacle moves left, in pixels per second. */
+  /** How fast every obstacle moves left at the start, in pixels per second (it speeds up with the score). */
   speed: 180,
   /** Distance between the left edges of two obstacles that follow each other. */
   spacing: 300,
@@ -143,11 +143,11 @@ export function isOffScreen(obstacle: Obstacle): boolean {
 }
 
 /**
- * Moves every obstacle left by `speed * dt`, drops the ones fully off the left edge and adds new ones on the right,
+ * Moves every obstacle left by `speed * dt` (the starting speed unless given), drops the ones fully off the left edge and adds new ones on the right,
  * exactly `spacing` apart. The first call adds the first obstacle.
  */
-export function stepField(field: ObstacleField, dt: number): ObstacleField {
-  const move = OBSTACLES.speed * dt;
+export function stepField(field: ObstacleField, dt: number, speed: number = OBSTACLES.speed): ObstacleField {
+  const move = speed * dt;
   let next: ObstacleField = {
     ...field,
     obstacles: field.obstacles.map((o) => ({ ...o, x: o.x - move })).filter((o) => !isOffScreen(o)),

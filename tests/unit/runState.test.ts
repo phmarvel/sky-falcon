@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest';
 import { FALCON, STEP_SECONDS, createFalcon, crash, flap } from '../../src/game/falcon/falconPhysics';
 import { OBSTACLES, type Obstacle } from '../../src/game/obstacles/obstacleField';
+import { scoreOf } from '../../src/game/score/runScore';
+import { SPEED_UP, scrollSpeedOf } from '../../src/game/score/speedUp';
 import { autopilotWantsFlap } from '../../src/game/run/autopilot';
 import { type RunState, advanceRun, createRun, parseRunOptions, stepRun } from '../../src/game/run/runState';
 
@@ -191,6 +193,47 @@ describe('every gap is reachable', () => {
     const run = autopilot(seed, 30, 50);
     expect(run.over).toBeNull();
     expect(run.passed).toBeGreaterThanOrEqual(30);
+  });
+});
+
+describe('speeding up', () => {
+  /** How far a lone obstacle moves in one step when the run has `passed` points. */
+  function moved(passed: number): number {
+    const run = { ...withObstacle({ x: 400 }, 300), passed };
+    const next = stepRun(run, STEP_SECONDS, bounds);
+    return 400 - next.field!.obstacles[0].x;
+  }
+
+  it('moves at the starting speed below 10 points and a little faster from 10', () => {
+    expect(moved(0)).toBeCloseTo(OBSTACLES.speed * STEP_SECONDS);
+    expect(moved(9)).toBeCloseTo(moved(0));
+    expect(moved(10)).toBeCloseTo(moved(0) * (1 + SPEED_UP.step));
+    expect(moved(19)).toBeCloseTo(moved(10));
+    expect(moved(20)).toBeCloseTo(moved(0) * (1 + 2 * SPEED_UP.step));
+  });
+
+  it('a score of 11 is as fast as 10 (one step)', () => {
+    expect(moved(11)).toBeCloseTo(moved(10));
+  });
+
+  it('a new run is back at the starting speed', () => {
+    const fresh = createRun(createFalcon(), bounds, 1);
+    expect(fresh.passed).toBe(0);
+    expect(scrollSpeedOf(scoreOf(fresh))).toBe(OBSTACLES.speed);
+  });
+
+  it('a simple player still passes 40 obstacles at the fastest speed (seeds 1, 7, 42, 99)', () => {
+    for (const seed of [1, 7, 42, 99]) {
+      let run = started(seed);
+      run = { ...run, passed: SPEED_UP.every * SPEED_UP.maxLevel };
+      const goal = run.passed + 40;
+      for (let i = 0; !run.over && run.passed < goal && i < 120 * 600; i++) {
+        if (autopilotWantsFlap(run)) run = { ...run, falcon: flap(run.falcon) };
+        run = advanceRun(run, 1000 / 60, bounds);
+      }
+      expect(run.over).toBeNull();
+      expect(run.passed).toBeGreaterThanOrEqual(goal);
+    }
   });
 });
 
