@@ -62,3 +62,42 @@ describe('createBestScoreStore', () => {
     expect(store.record(4).isNewBest).toBe(false);
   });
 });
+
+describe('game over scenarios', () => {
+  const fake = () => {
+    const data = new Map<string, string>();
+    return { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => void data.set(k, v) };
+  };
+
+  it('the first run: the best equals the score', () => {
+    expect(createBestScoreStore(fake()).record(4)).toEqual({ best: 4, isNewBest: true });
+  });
+
+  it('a score that does not beat the best leaves it unchanged', () => {
+    const store = createBestScoreStore(fake());
+    store.record(9);
+    expect(store.record(9)).toEqual({ best: 9, isNewBest: false });
+    expect(store.record(3)).toEqual({ best: 9, isNewBest: false });
+  });
+
+  it('a new best is still known by a new store on the same storage (a reload)', () => {
+    const storage = fake();
+    createBestScoreStore(storage).record(7);
+    expect(createBestScoreStore(storage).load()).toBe(7);
+  });
+
+  it('blocked storage: the best is kept for this visit', () => {
+    const blocked = {
+      getItem: () => {
+        throw new Error('blocked');
+      },
+      setItem: () => {
+        throw new Error('blocked');
+      },
+    };
+    const store = createBestScoreStore(blocked);
+    expect(store.record(5)).toEqual({ best: 5, isNewBest: true });
+    expect(store.record(2)).toEqual({ best: 5, isNewBest: false });
+    expect(store.load()).toBe(5);
+  });
+});
