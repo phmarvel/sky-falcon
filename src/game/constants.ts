@@ -19,4 +19,15 @@ export const COLORS = {
   falconEye: 0x1d1410,
   falconOutline: 0x3a2414,
   shadow: 0x8a5a24,
+  button: 0x2f7d4f,
+  buttonEdge: 0x1c4f32,
+} as const;
+
+/** Text styles for the screens. */
+export const UI = {
+  fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',
+  title: '#fff4d6',
+  titleStroke: '#3a2414',
+  bestText: '#fff4d6',
+  buttonText: '#ffffff',
 } as const;

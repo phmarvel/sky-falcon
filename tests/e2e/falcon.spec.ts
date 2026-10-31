@@ -30,7 +30,7 @@ test.beforeEach(async ({ page, browserName }) => {
 });
 
 async function openGame(page: Page) {
-  await page.goto('./');
+  await page.goto('./?scene=flight');
   await expect(page.locator('#game canvas')).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,
