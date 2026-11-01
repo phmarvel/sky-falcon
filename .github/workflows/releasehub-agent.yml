@@ -59,7 +59,7 @@ jobs:
           path: |
             ~/.npm
             ~/.cache/ms-playwright
-          key: releasehub-agent-${{ runner.os }}-v1
+          key: releasehub-agent-${{ runner.os }}-v2-${{ hashFiles('**/package-lock.json', '**/npm-shrinkwrap.json') }}
           restore-keys: releasehub-agent-${{ runner.os }}-
       - name: Run the agent
         env:
@@ -84,7 +84,7 @@ jobs:
           #!/usr/bin/env bash
           # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
           set -euo pipefail
-          RH_SCRIPT_VERSION="fb9c195e0a82"
+          RH_SCRIPT_VERSION="a7a2f69093e6"
           API="${RH_API%/}"
           EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
           WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
@@ -131,11 +131,13 @@ jobs:
           post() {
             local body ts sig code
             [ -f "$WORK/notes.out" ] || : > "$WORK/notes.out"
-            # A stage's result carries the repository notes the agent updated, for the next run.
+            [ -f "$WORK/task.out" ] || : > "$WORK/task.out"
+            # A stage's result carries the repository notes the agent updated, for the next run, and its notes on this task (plan 1.52).
             body=$(jq -c --arg id "$(new_id)" --argjson d "$RH_DISPATCH" --arg rid "$RUN_ID" --arg url "$RUN_URL" \
-              --rawfile notes "$WORK/notes.out" \
+              --rawfile notes "$WORK/notes.out" --rawfile task "$WORK/task.out" \
               '. + {eventId: $id, dispatch: $d, externalRunId: $rid, externalRunUrl: $url}
-               | if (.type == "plan" or .type == "code" or .type == "answer" or .type == "playtest") and $notes != "" then . + {notes: $notes} else . end' <<<"$1")
+               | if (.type == "plan" or .type == "code" or .type == "answer" or .type == "playtest") and $notes != "" then . + {notes: $notes} else . end
+               | if (.type == "plan" or .type == "code" or .type == "answer" or .type == "playtest") and $task != "" then . + {taskNotes: $task} else . end' <<<"$1")
             read -r ts sig <<<"$(sign "$body")"
             # From a file: Linux takes at most 128 KB in one argument, and a change's report carries its diff (up to 150 KB).
             printf '%s' "$body" > "$WORK/event.json"
@@ -296,6 +298,9 @@ jobs:
           PR_FILE=".releasehub-context/pull-request.md"
           # What a play-test found, as the agent writes it (plan 1.48).
           PLAYTEST_FILE=".releasehub-context/playtest.json"
+          # What runs of this task remember about it (plan 1.52): only this task's runs read it, so it holds what doesn't belong in the
+          # repository's notes (what was tried, decided and why, what failed and why, what's left).
+          TASK_FILE=".releasehub-context/task.md"
           prepare_notes() {
             mkdir -p .releasehub-context
             grep -qx ".releasehub-context/" .git/info/exclude 2>/dev/null || echo ".releasehub-context/" >> .git/info/exclude
@@ -307,6 +312,8 @@ jobs:
             fi
             jq -r '.memory.notes // ""' "$WORK/context.json" > "$NOTES_FILE"
             cp "$NOTES_FILE" "$WORK/notes.before"
+            jq -j '.taskMemory.notes // ""' "$WORK/context.json" > "$TASK_FILE"
+            cp "$TASK_FILE" "$WORK/task.before"
           }
           # What only a person can do, as the agent wrote it: up to 10 of {title, why, steps}; anything else is dropped.
           collect_needs() {
@@ -324,6 +331,8 @@ jobs:
           }
           collect_notes() {
             : > "$WORK/notes.out"
+            : > "$WORK/task.out"
+            if [ -f "$TASK_FILE" ] && [ -f "$WORK/task.before" ] && ! cmp -s "$TASK_FILE" "$WORK/task.before"; then head -c 6000 "$TASK_FILE" > "$WORK/task.out"; fi
             [ -f "$NOTES_FILE" ] || return 0
             if ! cmp -s "$NOTES_FILE" "$WORK/notes.before"; then head -c 16000 "$NOTES_FILE" > "$WORK/notes.out"; fi
             return 0
@@ -2139,6 +2148,399 @@ jobs:
           );
           RH_CAPTURE_END
             printf '#!/usr/bin/env bash\nexec node "%s/capture.mjs" "$@"\n' "$TOOLS" > "$TOOLS/rh-capture"
+            # The map of the repository's code (plan 1.50): where things are defined, what imports what.
+            cat > "$TOOLS/graph.mjs" <<'RH_GRAPH_END'
+          #!/usr/bin/env node
+          // rh-graph: a map of the repository's code for the agent (plan 1.50), built from the checkout with no AI: every source file's
+          // definitions (functions, classes, types) and what it imports, and who imports it. The agent asks it where things are and what
+          // depends on what, then reads only the files it points to, instead of searching and reading its way around (Graphify's idea).
+          //
+          //   rh-graph build               (re)builds .releasehub-context/graph.json from the files git tracks
+          //   rh-graph find WORDS...       where things whose names hold all the words are defined, then files whose path does
+          //   rh-graph file PATH           what a file defines and imports, and what imports it (a path's end is enough)
+          //   rh-graph uses PATH|NAME      what imports the file, or where the name is defined and used
+          //   rh-graph map                 the layout: folders, languages, the most imported files and the entry points
+          //
+          // It uses only what Node has (no packages), reads files up to 400 KB, and skips what's generated or installed.
+          import { execFileSync } from "node:child_process";
+          import fs from "node:fs";
+          import path from "node:path";
+
+          const OUT = ".releasehub-context/graph.json";
+          const MAX_FILE = 400_000;
+          const MAX_FILES = 30_000;
+          const SKIP = /(^|\/)(node_modules|vendor|dist|build|out|\.next|\.nuxt|coverage|bin|obj|Pods|DerivedData|\.gradle|\.dart_tool|\.godot|\.releasehub-context|target)\//;
+          const GENERATED = /(\.min\.(js|css)|\.g\.cs|\.Designer\.cs|\.generated\.\w+|\.pb\.\w+|-lock\.\w+|\.lock)$/;
+
+          const LANG = {
+            ".ts": "ts", ".tsx": "ts", ".mts": "ts", ".cts": "ts", ".js": "js", ".jsx": "js", ".mjs": "js", ".cjs": "js", ".vue": "js", ".svelte": "js",
+            ".cs": "cs", ".py": "py", ".gd": "gd", ".go": "go", ".java": "java", ".kt": "kt", ".kts": "kt", ".swift": "swift", ".dart": "dart",
+            ".rb": "rb", ".php": "php", ".rs": "rs",
+          };
+
+          const JS_EXT = [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts", ".vue", ".svelte", ".d.ts"];
+
+          /** Definitions, a line at a time: [regex, kind, group of the name]. Top-level only where a language nests a lot. */
+          const DEFS = {
+            js: [
+              [/^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\*?\s+([A-Za-z_$][\w$]*)/, "function"],
+              [/^(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+([A-Za-z_$][\w$]*)/, "class"],
+              [/^(?:export\s+)?(?:declare\s+)?(?:interface|type|enum)\s+([A-Za-z_$][\w$]*)/, "type"],
+              [/^(?:export\s+)?(?:const|let)\s+([A-Za-z_$][\w$]*)\s*(?::[^=]+)?=\s*(?:async\s*)?(?:\([^)]*\)|[A-Za-z_$][\w$]*)\s*(?::[^=]+)?=>/, "function"],
+              [/^export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/, "const"],
+            ],
+            cs: [
+              [/^\s*(?:(?:public|internal|private|protected|sealed|static|abstract|partial|file|readonly|unsafe|new)\s+)*(?:class|interface|record(?:\s+struct)?|struct|enum)\s+([A-Za-z_]\w*)/, "type"],
+              [/^\s+(?:public|internal|protected)\s+(?:(?:static|async|virtual|override|abstract|sealed|new|extern)\s+)*[\w<>\[\],.?() ]+\s+([A-Z]\w*)\s*\(/, "method"],
+            ],
+            py: [
+              [/^(?:async\s+)?def\s+([A-Za-z_]\w*)/, "function"],
+              [/^class\s+([A-Za-z_]\w*)/, "class"],
+            ],
+            gd: [
+              [/^class_name\s+([A-Za-z_]\w*)/, "class"],
+              [/^(?:static\s+)?func\s+([A-Za-z_]\w*)/, "function"],
+              [/^signal\s+([A-Za-z_]\w*)/, "signal"],
+            ],
+            go: [
+              [/^func\s+(?:\([^)]*\)\s*)?([A-Za-z_]\w*)/, "function"],
+              [/^type\s+([A-Za-z_]\w*)/, "type"],
+            ],
+            java: [[/^\s*(?:(?:public|private|protected|static|final|abstract|sealed)\s+)*(?:class|interface|enum|record)\s+([A-Za-z_]\w*)/, "type"]],
+            kt: [
+              [/^\s*(?:(?:public|private|internal|protected|open|data|sealed|abstract|enum|inner|value)\s+)*(?:class|interface|object)\s+([A-Za-z_]\w*)/, "type"],
+              [/^\s*(?:(?:public|private|internal|protected|override|suspend|inline)\s+)*fun\s+(?:<[^>]*>\s*)?(?:[\w.]+\.)?([A-Za-z_]\w*)\s*\(/, "function"],
+            ],
+            swift: [
+              [/^\s*(?:(?:public|private|internal|fileprivate|open|final)\s+)*(?:class|struct|enum|protocol|actor|extension)\s+([A-Za-z_]\w*)/, "type"],
+              [/^\s*(?:(?:public|private|internal|fileprivate|open|static|override|mutating)\s+)*func\s+([A-Za-z_]\w*)/, "function"],
+            ],
+            dart: [
+              [/^(?:abstract\s+)?(?:class|mixin|enum|extension)\s+([A-Za-z_]\w*)/, "type"],
+              [/^[A-Za-z_][\w<>,? ]*\s+([a-z_]\w*)\s*\([^;]*\)\s*(?:async\s*)?\{/, "function"],
+            ],
+            rb: [
+              [/^\s*(?:class|module)\s+([A-Z][\w:]*)/, "type"],
+              [/^\s*def\s+(?:self\.)?([a-z_]\w*[?!]?)/, "function"],
+            ],
+            php: [
+              [/^\s*(?:(?:abstract|final)\s+)?(?:class|interface|trait|enum)\s+([A-Za-z_]\w*)/, "type"],
+              [/^\s*(?:(?:public|private|protected|static|final|abstract)\s+)*function\s+([A-Za-z_]\w*)/, "function"],
+            ],
+            rs: [[/^\s*(?:pub(?:\([^)]*\))?\s+)?(?:async\s+)?(?:fn|struct|enum|trait|mod|type|union)\s+([A-Za-z_]\w*)/, "item"]],
+          };
+          DEFS.ts = DEFS.js;
+
+          /** What a file imports, as written (a path or a module). */
+          function importsOf(lang, text) {
+            const found = [];
+            const add = (re) => {
+              for (const m of text.matchAll(re)) found.push(m[1]);
+            };
+            switch (lang) {
+              case "ts":
+              case "js":
+                add(/(?:^|[\s;])(?:import|export)\s+(?:type\s+)?(?:[^'"`;]*?\s+from\s+)?['"]([^'"]+)['"]/gm);
+                add(/\brequire\(\s*['"]([^'"]+)['"]\s*\)/g);
+                add(/\bimport\(\s*['"]([^'"]+)['"]\s*\)/g);
+                break;
+              case "cs":
+                add(/^\s*(?:global\s+)?using\s+(?:static\s+)?([A-Za-z_][\w.]*)\s*;/gm);
+                break;
+              case "py":
+                add(/^\s*from\s+([.\w]+)\s+import\b/gm);
+                add(/^\s*import\s+([\w.]+)/gm);
+                break;
+              case "gd":
+                add(/\b(?:preload|load)\(\s*"([^"]+)"\s*\)/g);
+                add(/^extends\s+"([^"]+)"/gm);
+                break;
+              case "go":
+                add(/^import\s+"([^"]+)"/gm);
+                for (const block of text.matchAll(/^import\s*\(([\s\S]*?)\)/gm)) for (const m of block[1].matchAll(/"([^"]+)"/g)) found.push(m[1]);
+                break;
+              case "java":
+              case "kt":
+                add(/^\s*import\s+(?:static\s+)?([\w.]+)/gm);
+                break;
+              case "swift":
+                add(/^\s*import\s+(\w+)/gm);
+                break;
+              case "dart":
+                add(/^\s*(?:import|export|part)\s+'([^']+)'/gm);
+                break;
+              case "rb":
+                add(/\brequire(?:_relative)?\s*\(?\s*['"]([^'"]+)['"]/g);
+                break;
+              case "php":
+                add(/^\s*use\s+([\w\\]+)/gm);
+                break;
+              case "rs":
+                add(/^\s*(?:pub\s+)?use\s+([\w:]+)/gm);
+                add(/^\s*mod\s+(\w+)\s*;/gm);
+                break;
+            }
+            return [...new Set(found)];
+          }
+
+          function readJson(file) {
+            try {
+              // tsconfig allows comments and trailing commas.
+              const text = fs.readFileSync(file, "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:"'])\/\/.*$/gm, "$1").replace(/,(\s*[}\]])/g, "$1");
+              return JSON.parse(text);
+            } catch {
+              return null;
+            }
+          }
+
+          /** The path aliases of each tsconfig/jsconfig ("@/*" → "src/*"), by the folder it's in. */
+          function aliasesOf(files) {
+            const aliases = [];
+            for (const file of files.filter((f) => /(^|\/)(tsconfig|jsconfig)(\.app)?\.json$/.test(f))) {
+              const options = readJson(file)?.compilerOptions;
+              if (!options?.paths) continue;
+              const base = path.posix.join(path.posix.dirname(file), options.baseUrl ?? ".");
+              for (const [pattern, targets] of Object.entries(options.paths)) {
+                const target = Array.isArray(targets) ? targets[0] : null;
+                if (typeof target !== "string") continue;
+                aliases.push({ prefix: pattern.replace(/\*$/, ""), target: path.posix.normalize(path.posix.join(base, target.replace(/\*$/, ""))) + (target.endsWith("*") ? "/" : "") });
+              }
+            }
+            // The common "@/" for "src/" when nothing says otherwise.
+            if (!aliases.some((a) => a.prefix === "@/")) aliases.push({ prefix: "@/", target: "src/" });
+            return aliases;
+          }
+
+          /** The file an import names, when it's one of the repository's. */
+          function resolve(from, spec, lang, known, aliases, godotRoot) {
+            const exists = (p) => (known.has(p) ? p : null);
+            const tryJs = (base) => {
+              const clean = path.posix.normalize(base);
+              if (known.has(clean)) return clean;
+              for (const ext of JS_EXT) if (known.has(clean + ext)) return clean + ext;
+              for (const ext of JS_EXT) if (known.has(`${clean}/index${ext}`)) return `${clean}/index${ext}`;
+              // "./x.js" written for a TypeScript file x.ts.
+              const bare = clean.replace(/\.(m|c)?js$/, "");
+              if (bare !== clean) for (const ext of [".ts", ".tsx", ".mts", ".cts"]) if (known.has(bare + ext)) return bare + ext;
+              return null;
+            };
+            const dir = path.posix.dirname(from);
+            switch (lang) {
+              case "ts":
+              case "js": {
+                if (spec.startsWith(".")) return tryJs(path.posix.join(dir, spec));
+                for (const a of aliases) if (spec.startsWith(a.prefix)) return tryJs(a.target + spec.slice(a.prefix.length));
+                return null;
+              }
+              case "py": {
+                if (spec.startsWith(".")) {
+                  const ups = spec.match(/^\.+/)[0].length;
+                  let base = dir;
+                  for (let i = 1; i < ups; i++) base = path.posix.dirname(base);
+                  const rest = spec.slice(ups).replace(/\./g, "/");
+                  const p = rest ? path.posix.join(base, rest) : base;
+                  return exists(`${p}.py`) ?? exists(`${p}/__init__.py`);
+                }
+                const p = spec.replace(/\./g, "/");
+                return exists(`${p}.py`) ?? exists(`${p}/__init__.py`) ?? exists(`src/${p}.py`) ?? exists(`src/${p}/__init__.py`);
+              }
+              case "gd":
+                return spec.startsWith("res://") ? exists(path.posix.join(godotRoot ?? "", spec.slice(6))) : exists(path.posix.join(dir, spec));
+              case "dart":
+                if (spec.startsWith("package:")) return exists(`lib/${spec.split("/").slice(1).join("/")}`);
+                return spec.startsWith("dart:") ? null : exists(path.posix.join(dir, spec));
+              case "rb":
+                return exists(path.posix.join(dir, spec.endsWith(".rb") ? spec : `${spec}.rb`)) ?? exists(`lib/${spec}.rb`);
+              case "rs":
+                return /^\w+$/.test(spec) ? exists(path.posix.join(dir, `${spec}.rs`)) ?? exists(path.posix.join(dir, spec, "mod.rs")) : null;
+              default:
+                return null;
+            }
+          }
+
+          function git(args) {
+            return execFileSync("git", args, { encoding: "utf8", maxBuffer: 256 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"] });
+          }
+
+          function build() {
+            const started = Date.now();
+            let files;
+            try {
+              files = git(["ls-files", "-z"]).split("\0").filter(Boolean);
+            } catch {
+              files = [];
+            }
+            const sources = files.filter((f) => LANG[path.posix.extname(f).toLowerCase()] && !SKIP.test(f) && !GENERATED.test(f)).slice(0, MAX_FILES);
+            const known = new Set(files);
+            const aliases = aliasesOf(files);
+            const godot = files.find((f) => f === "project.godot" || f.endsWith("/project.godot"));
+            const godotRoot = godot ? path.posix.dirname(godot) : null;
+            const graph = {};
+            for (const file of sources) {
+              let text;
+              try {
+                const stat = fs.statSync(file);
+                if (stat.size > MAX_FILE) continue;
+                text = fs.readFileSync(file, "utf8");
+              } catch {
+                continue;
+              }
+              const lang = LANG[path.posix.extname(file).toLowerCase()];
+              const defs = [];
+              const lines = text.split("\n");
+              lines.forEach((line, i) => {
+                for (const [re, kind] of DEFS[lang] ?? []) {
+                  const m = line.match(re);
+                  if (m) {
+                    defs.push([m[1], kind, i + 1]);
+                    break;
+                  }
+                }
+              });
+              const imports = importsOf(lang, text).map((spec) => resolve(file, spec, lang, known, aliases, godotRoot) ?? spec);
+              graph[file] = { lang, lines: lines.length, defs: defs.slice(0, 400), imports: imports.slice(0, 200) };
+            }
+            let commit = null;
+            try {
+              commit = git(["rev-parse", "HEAD"]).trim();
+            } catch {
+              commit = null;
+            }
+            const out = { version: 1, commit, builtAt: new Date().toISOString(), files: graph };
+            fs.mkdirSync(path.dirname(OUT), { recursive: true });
+            fs.writeFileSync(OUT, JSON.stringify(out));
+            const links = Object.values(graph).reduce((n, f) => n + f.imports.filter((i) => graph[i]).length, 0);
+            const defs = Object.values(graph).reduce((n, f) => n + f.defs.length, 0);
+            return { out, summary: `Code graph: ${Object.keys(graph).length} files, ${defs} definitions, ${links} links between files (${((Date.now() - started) / 1000).toFixed(1)} s).` };
+          }
+
+          function load() {
+            try {
+              const out = JSON.parse(fs.readFileSync(OUT, "utf8"));
+              if (out?.version === 1 && out.files) return out;
+            } catch {
+              // Not built yet.
+            }
+            return build().out;
+          }
+
+          function importedBy(files) {
+            const by = {};
+            for (const [file, info] of Object.entries(files)) for (const target of info.imports) if (files[target]) (by[target] ??= []).push(file);
+            return by;
+          }
+
+          /** The repository's file a path names, a path's end being enough ("score.ts", "game/score.ts"). */
+          function fileNamed(files, name) {
+            const wanted = name.replace(/^\.\//, "").replace(/\\/g, "/");
+            if (files[wanted]) return wanted;
+            const ends = Object.keys(files).filter((f) => f === wanted || f.endsWith(`/${wanted}`));
+            return ends.length === 1 ? ends[0] : ends.sort((a, b) => a.length - b.length)[0] ?? null;
+          }
+
+          const short = (list, max) => (list.length <= max ? list.join(", ") : `${list.slice(0, max).join(", ")} (+${list.length - max})`);
+
+          function describe(files, by, file) {
+            const info = files[file];
+            const out = [`${file} (${info.lang}, ${info.lines} lines)`];
+            if (info.defs.length) out.push(`  defines: ${short(info.defs.map(([n, k, l]) => `${n} (${k}, ${l})`), 25)}`);
+            const inside = info.imports.filter((i) => files[i]);
+            const outside = info.imports.filter((i) => !files[i]);
+            if (inside.length) out.push(`  imports: ${short(inside, 20)}`);
+            if (outside.length) out.push(`  uses packages/modules: ${short(outside, 15)}`);
+            out.push(`  imported by: ${by[file]?.length ? short(by[file], 20) : "nothing in the repository"}`);
+            return out.join("\n");
+          }
+
+          function words(name) {
+            // "runScore" → "run score"; "RUN_SCORE" → "run score".
+            return name.replace(/([a-z0-9])([A-Z])/g, "$1 $2").replace(/[_\-.]+/g, " ").toLowerCase();
+          }
+
+          function find(files, terms) {
+            const wanted = terms.map((t) => t.toLowerCase()).filter(Boolean);
+            if (wanted.length === 0) return "Say what to find: rh-graph find WORDS...";
+            const hits = [];
+            for (const [file, info] of Object.entries(files)) {
+              for (const [name, kind, line] of info.defs) {
+                const said = `${name.toLowerCase()} ${words(name)}`;
+                if (wanted.every((w) => said.includes(w))) hits.push({ text: `${name} (${kind}) — ${file}:${line}`, exact: wanted.length === 1 && name.toLowerCase() === wanted[0] });
+              }
+            }
+            hits.sort((a, b) => Number(b.exact) - Number(a.exact));
+            const paths = Object.keys(files).filter((f) => wanted.every((w) => f.toLowerCase().includes(w)));
+            const out = [];
+            if (hits.length) out.push(`Defined in:\n${hits.slice(0, 30).map((h) => `  ${h.text}`).join("\n")}${hits.length > 30 ? `\n  (+${hits.length - 30} more: add a word)` : ""}`);
+            if (paths.length) out.push(`Files:\n${paths.slice(0, 20).map((p) => `  ${p}`).join("\n")}${paths.length > 20 ? `\n  (+${paths.length - 20} more)` : ""}`);
+            return out.length ? out.join("\n\n") : `Nothing named so: try another word, or rh-graph map.`;
+          }
+
+          function uses(files, by, name) {
+            const file = fileNamed(files, name);
+            if (file) return `${file} is imported by: ${by[file]?.length ? `\n  ${by[file].join("\n  ")}` : "nothing in the repository"}`;
+            const defined = [];
+            for (const [f, info] of Object.entries(files)) for (const [n, , line] of info.defs) if (n === name) defined.push(`${f}:${line}`);
+            const mentions = [];
+            const word = new RegExp(`\\b${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`);
+            for (const f of Object.keys(files)) {
+              if (mentions.length >= 40) break;
+              try {
+                const text = fs.readFileSync(f, "utf8");
+                if (!word.test(text)) continue;
+                const line = text.split("\n").findIndex((l) => word.test(l));
+                mentions.push(`${f}:${line + 1}`);
+              } catch {
+                // Gone since the graph was built.
+              }
+            }
+            const out = [];
+            out.push(defined.length ? `${name} is defined in:\n  ${defined.join("\n  ")}` : `${name} isn't defined as a top-level name here.`);
+            if (mentions.length) out.push(`Mentioned in:\n  ${mentions.join("\n  ")}${mentions.length >= 40 ? "\n  (and more)" : ""}`);
+            return out.join("\n\n");
+          }
+
+          function map(files, by) {
+            const folders = {};
+            const langs = {};
+            for (const [file, info] of Object.entries(files)) {
+              const parts = file.split("/");
+              const key = parts.length > 2 ? `${parts[0]}/${parts[1]}/` : parts.length > 1 ? `${parts[0]}/` : "./";
+              folders[key] = (folders[key] ?? 0) + 1;
+              langs[info.lang] = (langs[info.lang] ?? 0) + 1;
+            }
+            const hubs = Object.entries(by).sort((a, b) => b[1].length - a[1].length).slice(0, 12).map(([f, list]) => `  ${f} (${list.length})`);
+            const entries = Object.entries(files)
+              .filter(([f, info]) => !by[f] && info.imports.some((i) => files[i]) && !/(test|spec|stories)\b/i.test(f))
+              .sort((a, b) => b[1].imports.length - a[1].imports.length)
+              .slice(0, 8)
+              .map(([f]) => `  ${f}`);
+            return [
+              `${Object.keys(files).length} source files: ${Object.entries(langs).map(([l, n]) => `${l} ${n}`).join(", ")}`,
+              `Folders:\n${Object.entries(folders).sort((a, b) => b[1] - a[1]).slice(0, 25).map(([f, n]) => `  ${f} ${n}`).join("\n")}`,
+              hubs.length ? `Most imported:\n${hubs.join("\n")}` : null,
+              entries.length ? `Entry points (import others, imported by none):\n${entries.join("\n")}` : null,
+            ].filter(Boolean).join("\n\n");
+          }
+
+          const [command, ...rest] = process.argv.slice(2);
+          if (command === "build") {
+            console.log(build().summary);
+          } else if (["find", "file", "uses", "map"].includes(command)) {
+            const { files } = load();
+            const by = importedBy(files);
+            if (command === "find") console.log(find(files, rest));
+            else if (command === "map") console.log(map(files, by));
+            else if (!rest[0]) console.log(`Say which: rh-graph ${command} ${command === "file" ? "PATH" : "PATH|NAME"}`);
+            else if (command === "file") {
+              const file = fileNamed(files, rest[0]);
+              console.log(file ? describe(files, by, file) : `No source file ends with ${rest[0]}: try rh-graph find ${path.basename(rest[0]).replace(/\.\w+$/, "")}`);
+            } else console.log(uses(files, by, rest[0]));
+          } else {
+            console.log("rh-graph build | find WORDS... | file PATH | uses PATH|NAME | map");
+            process.exitCode = command ? 1 : 0;
+          }
+          RH_GRAPH_END
+            printf '#!/usr/bin/env bash\nexec node "%s/graph.mjs" "$@"\n' "$TOOLS" > "$TOOLS/rh-graph"
             cat > "$TOOLS/rh-memory" <<'RH_MEMORY_END'
           #!/usr/bin/env bash
           # rh-memory: looks things up in ReleaseHub's record of this agent's earlier runs (what was tried, what reviewers said).
@@ -2152,8 +2554,45 @@ jobs:
           esac
           echo
           RH_MEMORY_END
-            chmod +x "$TOOLS/rh-verify" "$TOOLS/rh-capture" "$TOOLS/rh-memory"
+            chmod +x "$TOOLS/rh-verify" "$TOOLS/rh-capture" "$TOOLS/rh-memory" "$TOOLS/rh-graph"
             export PATH="$TOOLS:$PATH" RH_WORK="$WORK" RH_KIT="$PWD/$KIT_DIR" RH_SHOTS="$PWD/$SHOTS_DIR" RH_APP_LOG="$WORK/app.log" RH_APP_PIDS="$WORK/app.pids"
+          }
+
+          # The map of the repository's code (plan 1.50), built from the checkout before the agent starts (no AI, a few seconds): the
+          # agent asks it where things are instead of searching and reading its way around.
+          GRAPH_OK=""
+          build_graph() {
+            if "$TOOLS/rh-graph" build > "$WORK/graph.txt" 2>&1; then
+              GRAPH_OK=1
+              log "$(head -c 300 "$WORK/graph.txt")"
+              upload_graph
+            else
+              log "The code graph couldn't be built ($(tail -c 200 "$WORK/graph.txt")): the agent finds its way without it." warning
+            fi
+            return 0
+          }
+          # Main's code graph goes to ReleaseHub (plan 1.50b) when this checkout is the base branch as it stands and ReleaseHub doesn't
+          # have that commit's yet: the Lead and the overlap warning read it. Never a branch's own changes.
+          upload_graph() {
+            local head base kept sha code
+            head=$(git rev-parse HEAD 2>/dev/null) || return 0
+            base=$(git rev-parse "origin/$RH_BASE" 2>/dev/null) || return 0
+            [ "$head" = "$base" ] || return 0
+            kept=$(jq -r '.graph.commit // ""' "$WORK/context.json")
+            [ "$kept" != "$head" ] || return 0
+            gzip -c .releasehub-context/graph.json > "$WORK/graph.json.gz" 2>/dev/null || return 0
+            if [ "$(size_of "$WORK/graph.json.gz")" -gt 8388608 ]; then
+              log "The code graph is over 8 MB packed, so ReleaseHub doesn't keep it." warning
+              return 0
+            fi
+            sha=$(sha256_of "$WORK/graph.json.gz" | cut -d' ' -f1)
+            read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.graph.$sha")"
+            code=$(curl -sS --retry 2 -o "$WORK/graph-sent.json" -w '%{http_code}' -X POST \
+              "$API/api/v1/ai/runner/runs/$RH_RUN/graph?dispatch=$RH_DISPATCH&sha=$head" \
+              -H 'Content-Type: application/gzip' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
+              -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$WORK/graph.json.gz" || true)
+            [ "${code:0:1}" = "2" ] || log "Couldn't keep the code graph in ReleaseHub (HTTP $code)." warning
+            return 0
           }
 
           # Before the agent starts: start the app and sign in with the saved preview settings, so the agent begins with a running app
@@ -2322,6 +2761,7 @@ jobs:
             prepare_notes
             restore_session
             write_tools
+            build_graph
             clone_extras
             RH_LOOKUP_TOKEN=$(jq -r '.lookup.token // empty' "$WORK/context.json")
             export RH_LOOKUP_TOKEN RH_LOOKUP_URL="$API/api/v1/ai/runner/runs/$RH_RUN/lookup"
@@ -2377,7 +2817,7 @@ jobs:
             local creds=""
             [ -f "$WORK/conflicts.txt" ] || : > "$WORK/conflicts.txt"
             [ ! -f "$WORK/preview.env" ] || creds=1
-            jq -r --arg stage "$RH_STAGE" --arg notes "$NOTES_FILE" --rawfile files "$WORK/files.txt" --rawfile app "$WORK/app.txt" --rawfile extras "$WORK/extras.txt" \
+            jq -r --arg stage "$RH_STAGE" --arg notes "$NOTES_FILE" --arg task "$TASK_FILE" --arg graph "$GRAPH_OK" --rawfile files "$WORK/files.txt" --rawfile app "$WORK/app.txt" --rawfile extras "$WORK/extras.txt" \
               --arg browser "$BROWSER" --arg shots "$PWD/$SHOTS_DIR" --arg kit "$PWD/$KIT_DIR" --arg creds "$creds" \
               --arg phone "$PHONE" --arg phoneon "$PHONE_ON" --arg phonetool "$PHONE_TOOL" --rawfile phoneapp "$WORK/phone-app.txt" \
               --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" --arg needs "$NEEDS_FILE" --arg github "${GITHUB_RUN_ID:+1}" \
@@ -2400,6 +2840,11 @@ jobs:
                   "do not stop at small edits. If the feedback asks for more than the plan covered, rethink the approach and do the larger change. " +
                   "Add or update tests. Do not commit or push: the workflow does that.\n\n" end) +
               (if .memory then "## What earlier runs learned about this repository\nYour memory file (" + $notes + ") holds it — trust it and do not explore again what it already says.\n\n" else "" end) +
+              (if .taskMemory then "## What earlier runs of this task learned\nThe task'"'"'s memory file (" + $task + ") holds it: read it first, build on what worked, and do not try again what it says failed.\n\n" else "" end) +
+              (if .projectMemory then "## What everyone on this project should know\n" + .projectMemory.notes + "\n\n" else "" end) +
+              (if $graph != "" then "## Finding your way around the code\nA map of this repository'"'"'s code is ready (rh-graph, no cost): `rh-graph find WORDS` shows where things are defined, " +
+                "`rh-graph file PATH` what a file defines and imports and what imports it, `rh-graph uses PATH|NAME` what depends on it, `rh-graph map` the layout. " +
+                "Ask it before you search or read files, then read only the files it points to.\n\n" else "" end) +
               (if .discussing then "## The change being discussed: " + .discussing.key + " — " + .discussing.title + " (" + .discussing.status + ")\nTask: " + .discussing.task + "\n" +
                 (if (.discussing.plan // "") != "" then "\nIts plan:\n" + .discussing.plan + "\n" else "" end) +
                 (if (.discussing.changedFiles | length) > 0 then "\nFiles it changed: " + (.discussing.changedFiles | join(", ")) + "\n" else "" end) +
@@ -2553,8 +2998,12 @@ jobs:
                   "in the language the task is written in: ## What changed (what people will see or what behaves differently, then the main files), ## Why (the task, in a line), " +
                   "## How it was checked (the checks you ran and what they showed, the screens you looked at and at which sizes), and anything a reviewer should look at closely. " +
                   "Under 60 lines; describe the whole change on the branch, not only this round." else "" end) +
-              "\n- Before you finish, update " + $notes + " with what a future run on this repository should know: its structure, where things live, " +
-              "conventions, commands, pitfalls. Keep it short (under 150 lines), current and general — not details of this task.\n"
+              "\n- Before you finish, update " + $notes + " with what a future run on this repository should know: " +
+              (if $graph != "" then "conventions, commands, pitfalls and decisions the code does not show (not where things live: rh-graph shows that, always current). "
+                else "its structure, where things live, conventions, commands, pitfalls. " end) +
+              "Keep it short (under 150 lines), current and general — not details of this task." +
+              (if .workItem then "\n- Before you finish, update " + $task + " with what the next run on this task should know: what you tried, what you decided " +
+                "and why, what failed and why, what the person asked for and what is left. Short (under 60 lines) and only about this task." else "" end) + "\n"
             ' "$WORK/context.json"
           }
 
@@ -2600,7 +3049,7 @@ jobs:
                 [ -z "$SESSION_FORK" ] || resume+=(--fork-session)
                 # Notes are kept up to date in every stage, and so is the list of what only a person can do (the only files a read-only
                 # stage writes).
-                [ "$2" = "plan" ] && tools="Read,Glob,Grep,Edit($NOTES_FILE),Write($NOTES_FILE),Edit($NEEDS_FILE),Write($NEEDS_FILE)"
+                [ "$2" = "plan" ] && tools="Read,Glob,Grep,Bash(rh-graph:*),Edit($NOTES_FILE),Write($NOTES_FILE),Edit($TASK_FILE),Write($TASK_FILE),Edit($NEEDS_FILE),Write($NEEDS_FILE)"
                 local mcp=() agents=()
                 if [ -n "$BROWSER$PHONE$GAME" ]; then
                   # Running the app needs Bash even in a read-only stage; whatever it changes is reset after the stage.
