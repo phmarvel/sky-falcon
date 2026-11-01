@@ -30,3 +30,9 @@ export function createRandom(seed: number): () => number {
 export function randomSeed(): number {
   return Math.floor(Math.random() * 0x7fffffff);
 }
+
+/** A stateless number in [0, 1) from a seed and a counter: the same pair always gives the same number. */
+export function hashUnit(seed: number, n: number): number {
+  const mixed = (seed | 0) ^ Math.imul((n | 0) + 1, 0x9e3779b1);
+  return randomStep(randomStep(mixed | 0).state ^ 0x1b873593).value;
+}

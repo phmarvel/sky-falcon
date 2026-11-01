@@ -1,11 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import { FALCON } from '../../src/game/falcon/falconPhysics';
+import { scrollSpeedOf } from '../../src/game/score/speedUp';
 import {
   DATE,
+  FEATHER,
   OBSTACLES,
   type ObstacleField,
   createField,
   gapRange,
+  hasFeather,
   isOffScreen,
   nextGap,
   stepField,
@@ -172,7 +175,8 @@ describe('dates', () => {
     const all = collect(5, 30);
     expect(all.length).toBeGreaterThan(5);
     for (const o of all) {
-      expect(o.date.caught).toBe(false);
+      // A feather gap holds the feather instead (its date is marked caught so it is never shown).
+      expect(o.date.caught).toBe(o.feather != null);
       expect(o.date.y - DATE.radius).toBeGreaterThanOrEqual(o.gapTop);
       expect(o.date.y + DATE.radius).toBeLessThanOrEqual(o.gapBottom);
       expect(DATE.offsetX).toBe(o.width / 2);
@@ -183,5 +187,93 @@ describe('dates', () => {
     const a = collect(9, 20).map((o) => [o.kind, o.gapTop]);
     const b = collect(9, 20).map((o) => [o.kind, o.gapTop]);
     expect(a).toEqual(b);
+  });
+});
+
+describe('feathers', () => {
+  const collectMode = (seed: number, seconds: number, mode: 'rare' | 'always' | 'off') => {
+    let field = createField(seed, GROUND, FALCON.startY, mode);
+    const seen = new Map<number, ObstacleField['obstacles'][number]>();
+    for (let i = 0; i < Math.round(seconds / DT); i++) {
+      field = stepField(field, DT);
+      for (const o of field.obstacles) if (!seen.has(o.id)) seen.set(o.id, o);
+    }
+    return [...seen.values()];
+  };
+
+  it('the same seed gives the same feathers', () => {
+    const ids = (seed: number) => collectMode(seed, 60, 'rare').filter((o) => o.feather).map((o) => o.id);
+    expect(ids(4)).toEqual(ids(4));
+    expect(ids(4).length).toBeGreaterThan(0);
+  });
+
+  it('a feather gap has its feather inside the gap and no date; the first gap never has one', () => {
+    const all = collectMode(2, 120, 'rare');
+    const withFeather = all.filter((o) => o.feather);
+    expect(withFeather.length).toBeGreaterThan(0);
+    const range = gapRange(GROUND);
+    for (const o of withFeather) {
+      expect(o.id).toBeGreaterThanOrEqual(FEATHER.minId);
+      expect(o.date.caught).toBe(true);
+      expect(o.feather!.caught).toBe(false);
+      expect(o.feather!.y - FEATHER.radius).toBeGreaterThanOrEqual(o.gapTop);
+      expect(o.feather!.y + FEATHER.radius).toBeLessThanOrEqual(o.gapBottom);
+      expect(o.gapTop).toBeGreaterThanOrEqual(range.min);
+      expect(o.gapTop).toBeLessThanOrEqual(range.max);
+      expect(FEATHER.offsetX).toBe(DATE.offsetX);
+    }
+    for (const o of all.filter((x) => !x.feather)) expect(o.date.caught).toBe(false);
+    expect(all.find((o) => o.id === 1)!.feather).toBeFalsy();
+  });
+
+  it('feathers are rare and never in two gaps in a row', () => {
+    let count = 0;
+    let total = 0;
+    for (let seed = 1; seed <= 10; seed++) {
+      const all = collectMode(seed, 60, 'rare');
+      total += all.length;
+      all.forEach((o, i) => {
+        if (!o.feather) return;
+        count++;
+        expect(all[i - 1]?.feather).toBeFalsy();
+      });
+    }
+    expect(count / total).toBeGreaterThan(0.05);
+    expect(count / total).toBeLessThan(0.3);
+  });
+
+  it('feathers do not change the layout: same gaps, kinds and positions as with them off', () => {
+    const layout = (mode: 'rare' | 'always' | 'off') =>
+      collectMode(7, 40, mode).map((o) => [o.id, o.kind, o.x, o.gapTop, o.gapBottom]);
+    expect(layout('rare')).toEqual(layout('off'));
+    expect(layout('always')).toEqual(layout('off'));
+  });
+
+  it('off gives no feathers and uncaught dates everywhere; always gives one in every gap after the first', () => {
+    for (const o of collectMode(3, 40, 'off')) {
+      expect(o.feather).toBeFalsy();
+      expect(o.date.caught).toBe(false);
+    }
+    for (const o of collectMode(3, 40, 'always')) expect(!!o.feather).toBe(o.id >= FEATHER.minId);
+  });
+
+  it('hasFeather follows the mode', () => {
+    expect(hasFeather(1, 5, false, 'off')).toBe(false);
+    expect(hasFeather(1, 1, false, 'always')).toBe(false);
+    expect(hasFeather(1, 5, true, 'always')).toBe(true);
+    expect(hasFeather(1, 5, true, 'rare')).toBe(false);
+  });
+
+  it('a feather keeps its place in its obstacle at the start speed and at a sped-up speed', () => {
+    for (const speed of [OBSTACLES.speed, scrollSpeedOf(30)]) {
+      let field = createField(3, GROUND, FALCON.startY, 'always');
+      for (let i = 0; i < 400; i++) field = stepField(field, DT, speed);
+      const o = field.obstacles.find((x) => x.feather)!;
+      const before = o.x;
+      const next = stepField(field, 0.5, speed).obstacles.find((x) => x.id === o.id)!;
+      expect(before - next.x).toBeCloseTo(speed * 0.5);
+      expect(next.feather!.y).toBe(o.feather!.y);
+    }
+    expect(scrollSpeedOf(30)).toBeGreaterThan(OBSTACLES.speed);
   });
 });

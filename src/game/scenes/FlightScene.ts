@@ -10,7 +10,7 @@ import {
 } from "../falcon/falconPhysics";
 import { type FalconView, createFalconView } from "../falcon/drawFalcon";
 import { createPressGate } from "../falcon/pressGate";
-import { DATE, type ObstacleKind } from "../obstacles/obstacleField";
+import { DATE, FEATHER, type ObstacleKind } from "../obstacles/obstacleField";
 import {
   type ObstacleView,
   createObstacleView,
@@ -57,6 +57,10 @@ export interface ObstacleSnapshot {
   dateX: number;
   dateY: number;
   dateCaught: boolean;
+  /** The feather in the gap, if any (a gap never has both a date and a feather). */
+  featherX: number | null;
+  featherY: number | null;
+  featherCaught: boolean;
 }
 
 /**
@@ -94,6 +98,7 @@ export class FlightScene extends Phaser.Scene {
       this.bounds,
       options.seed ?? randomSeed(),
       options.obstacles,
+      options.feather,
     );
     this.obstacleView = createObstacleView(this, this.bounds.groundY);
     this.scoreView = createScoreView(this, getLangStore().get());
@@ -124,6 +129,7 @@ export class FlightScene extends Phaser.Scene {
     if (this.run.falcon.phase === "flying") {
       this.run = advanceRun(this.run, delta, this.bounds);
       this.obstacleView.sync(this.run.field);
+      this.view.setShield(this.run.shield);
       if (this.run.over) this.endRun(this.run.over);
       this.publish();
     }
@@ -189,7 +195,7 @@ export class FlightScene extends Phaser.Scene {
     };
     this.registry.set("falcon", snapshot);
     const obstacles: ObstacleSnapshot[] = (this.run.field?.obstacles ?? []).map(
-      ({ id, kind, x, width, gapTop, gapBottom, date }) => ({
+      ({ id, kind, x, width, gapTop, gapBottom, date, feather }) => ({
         id,
         kind,
         x,
@@ -199,11 +205,17 @@ export class FlightScene extends Phaser.Scene {
         dateX: x + DATE.offsetX,
         dateY: date.y,
         dateCaught: date.caught,
+        featherX: feather ? x + FEATHER.offsetX : null,
+        featherY: feather ? feather.y : null,
+        featherCaught: feather ? feather.caught : false,
       }),
     );
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
     this.registry.set("dates", this.run.dates);
+    this.registry.set("shield", this.run.shield);
+    this.registry.set("feathers", this.run.feathers);
+    this.registry.set("shieldDrawn", this.view.shieldShown());
     const score = scoreOf(this.run);
     this.scoreView.set(score);
     this.registry.set("score", score);
@@ -212,5 +224,6 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("scrollSpeed", scrollSpeedOf(score));
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
     this.registry.set("datesDrawn", this.obstacleView.datesDrawn());
+    this.registry.set("feathersDrawn", this.obstacleView.feathersDrawn());
   }
 }

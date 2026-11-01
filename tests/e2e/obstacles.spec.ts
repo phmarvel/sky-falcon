@@ -50,7 +50,7 @@ test.beforeEach(async ({ page, browserName }) => {
 
 /** Opens the flight directly (`?scene=flight`, skipping the start screen) with the obstacles of `seed`. */
 async function openGame(page: Page, seed: number) {
-  await page.goto(`./?scene=flight&seed=${seed}`);
+  await page.goto(`./?scene=flight&seed=${seed}&feather=off`);
   await expect(page.locator('#game canvas').first()).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,
