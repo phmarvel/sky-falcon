@@ -32,11 +32,23 @@ export const COLORS = {
   dateShade: 0x5a2d12,
   dateShine: 0xd89a62,
   dateOutline: 0x3a1c0a,
+  featherGold: 0xf2b92c,
+  featherLight: 0xffe08a,
+  featherShaft: 0xb97a10,
+  featherOutline: 0x7a4a05,
+  shieldGlow: 0xffd34d,
   button: 0x2f7d4f,
   buttonEdge: 0x1c4f32,
   overlay: 0x1d1410,
   panel: 0xfff4d6,
   panelEdge: 0x3a2414,
+  medalRibbon: 0xc0392b,
+  medalRibbonDark: 0x8e2a20,
+  medal: {
+    bronze: { face: 0xcd7f32, edge: 0x8a4f1a, star: 0xf3c89b },
+    silver: { face: 0xc9d1d9, edge: 0x7b8794, star: 0xffffff },
+    gold: { face: 0xffc629, edge: 0xb8860b, star: 0xfff3b0 },
+  },
 } as const;
 
 /** Draw order of the score: above the obstacles (0) and the falcon (10), under the game over screen (100). */

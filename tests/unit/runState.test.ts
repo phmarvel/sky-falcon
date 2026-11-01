@@ -258,9 +258,22 @@ describe('speeding up', () => {
 
 describe('parseRunOptions', () => {
   it('reads the seed and the obstacles switch from the address', () => {
-    expect(parseRunOptions('')).toEqual({ obstacles: true, seed: undefined, autopilot: false });
-    expect(parseRunOptions('?seed=7&autopilot=1')).toEqual({ obstacles: true, seed: 7, autopilot: true });
-    expect(parseRunOptions('?obstacles=off&seed=abc')).toEqual({ obstacles: false, seed: undefined, autopilot: false });
+    expect(parseRunOptions('')).toEqual({ obstacles: true, seed: undefined, autopilot: false, feather: 'rare' });
+    expect(parseRunOptions('?seed=7&autopilot=1')).toEqual({
+      obstacles: true,
+      seed: 7,
+      autopilot: true,
+      feather: 'rare',
+    });
+    expect(parseRunOptions('?obstacles=off&seed=abc')).toEqual({
+      obstacles: false,
+      seed: undefined,
+      autopilot: false,
+      feather: 'rare',
+    });
+    expect(parseRunOptions('?feather=always').feather).toBe('always');
+    expect(parseRunOptions('?feather=off').feather).toBe('off');
+    expect(parseRunOptions('?feather=maybe').feather).toBe('rare');
   });
 });
 
@@ -305,5 +318,85 @@ describe('dates (extra points)', () => {
     const run = stepRun(withObstacle({ x, date: { y: 240, caught: false } }, 240), STEP_SECONDS, bounds);
     expect(run.over).toBe('obstacle');
     expect(run.dates).toBe(0);
+  });
+});
+
+describe('the golden feather and its shield', () => {
+  const mid = 250 + OBSTACLES.gapSize / 2;
+  const feathered = (o: Partial<Obstacle> = {}): Partial<Obstacle> => ({
+    date: { y: mid, caught: true },
+    feather: { y: mid, caught: false },
+    ...o,
+  });
+
+  it('a run starts with no shield and no feathers', () => {
+    const run = started();
+    expect(run.shield).toBe(false);
+    expect(run.feathers).toBe(0);
+  });
+
+  it('catching a feather gives a shield, once, and adds no points', () => {
+    const run = flyLevel(withObstacle(feathered(), mid), mid, 1.8);
+    expect(run.shield).toBe(true);
+    expect(run.feathers).toBe(1);
+    expect(run.dates).toBe(0);
+    expect(scoreOf(run)).toBe(1); // only the obstacle passed
+    expect(run.field!.obstacles.find((o) => o.id === 1)?.feather?.caught ?? true).toBe(true);
+  });
+
+  it('a second feather while shielded does nothing extra', () => {
+    const base = withObstacle(feathered(), mid);
+    const run = flyLevel({ ...base, shield: true, feathers: 1 }, mid, 1.8);
+    expect(run.shield).toBe(true);
+    expect(run.feathers).toBe(1);
+    expect(run.field!.obstacles.find((o) => o.id === 1)?.feather?.caught ?? true).toBe(true);
+  });
+
+  it('a shielded hit on an obstacle breaks the shield, keeps the run going and is not repeated', () => {
+    const base = { ...withObstacle({}, 240), shield: true };
+    const run = flyLevel(base, 240, 1.6);
+    expect(run.over).toBeNull();
+    expect(run.shield).toBe(false);
+    expect(run.falcon.phase).toBe('flying');
+    expect(run.passed).toBe(1);
+  });
+
+  it('the hit after the shield broke ends the run as before', () => {
+    const first = withObstacle({}, 240);
+    const second: Obstacle = { ...first.field!.obstacles[0], id: 2, x: 300 + 150 };
+    const run = flyLevel(
+      { ...first, shield: true, field: { ...first.field!, obstacles: [...first.field!.obstacles, second] } },
+      240,
+      4,
+    );
+    expect(run.over).toBe('obstacle');
+    expect(run.shield).toBe(false);
+  });
+
+  it('a shielded hit on the sand bounces the falcon up; the next sand hit ends the run', () => {
+    let run: RunState = { ...started(1, false), shield: true };
+    run = { ...run, falcon: { ...run.falcon, y: bounds.groundY - FALCON.radius - 1, vy: 400 } };
+    run = stepRun(run, STEP_SECONDS, bounds);
+    expect(run.over).toBeNull();
+    expect(run.shield).toBe(false);
+    expect(run.falcon.phase).toBe('flying');
+    expect(run.falcon.vy).toBeLessThan(0);
+    for (let i = 0; i < 600 && !run.over; i++) run = stepRun(run, STEP_SECONDS, bounds);
+    expect(run.over).toBe('ground');
+  });
+
+  it('a shielded sand hit also bounces with obstacles on', () => {
+    let run: RunState = { ...started(1), shield: true };
+    run = { ...run, falcon: { ...run.falcon, y: bounds.groundY - FALCON.radius - 1, vy: 400 } };
+    run = stepRun(run, STEP_SECONDS, bounds);
+    expect(run.over).toBeNull();
+    expect(run.shield).toBe(false);
+  });
+
+  it('without feathers nothing changes: no shield ever, hits end the run', () => {
+    const run = flyLevel(withObstacle({}, 240), 240, 3);
+    expect(run.over).toBe('obstacle');
+    expect(run.shield).toBe(false);
+    expect(run.feathers).toBe(0);
   });
 });

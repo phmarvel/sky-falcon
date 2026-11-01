@@ -17,6 +17,10 @@ export interface FalconView {
   flapWing(): void;
   /** After hitting an obstacle: the falcon tumbles from where it is onto the sand. */
   fallFrom(y: number): void;
+  /** Shows or hides the golden glow around the falcon while a feather shields it. */
+  setShield(on: boolean): void;
+  /** Whether the glow is shown now. */
+  shieldShown(): boolean;
   /** Places the falcon for this frame. */
   update(state: FalconState, timeMs: number): void;
 }
@@ -81,7 +85,18 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
   drawWing(wing);
   wing.angle = WING_REST;
 
-  const container = scene.add.container(FALCON.x, FALCON.startY, [body, wing]).setDepth(FALCON_DEPTH);
+  // The shield glow: soft golden rings behind the body, pulsing while shown.
+  const glow = scene.add.graphics();
+  for (const [radius, alpha] of [[58, 0.14], [48, 0.2], [38, 0.26]] as const) {
+    glow.fillStyle(COLORS.shieldGlow, alpha);
+    glow.fillCircle(0, 0, radius);
+  }
+  glow.lineStyle(3, COLORS.shieldGlow, 0.9);
+  glow.strokeCircle(0, 0, 50);
+  glow.setVisible(false);
+  let pulse: Phaser.Tweens.Tween | undefined;
+
+  const container = scene.add.container(FALCON.x, FALCON.startY, [glow, body, wing]).setDepth(FALCON_DEPTH);
   /** 1 right after a flap, easing back to 0. */
   const stroke = { lift: 0 };
   let strokeTween: Phaser.Tweens.Tween | undefined;
@@ -90,6 +105,14 @@ export function createFalconView(scene: Phaser.Scene, groundY: number): FalconVi
 
   return {
     container,
+    setShield(on) {
+      if (glow.visible === on) return;
+      glow.setVisible(on);
+      pulse?.stop();
+      glow.setAlpha(1).setScale(1);
+      if (on) pulse = scene.tweens.add({ targets: glow, alpha: 0.6, scale: 1.08, duration: 450, yoyo: true, repeat: -1 });
+    },
+    shieldShown: () => glow.visible,
     flapWing() {
       strokeTween?.stop();
       stroke.lift = 1;

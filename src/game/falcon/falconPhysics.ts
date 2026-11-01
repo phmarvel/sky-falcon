@@ -15,6 +15,8 @@ export const FALCON = {
   flapVelocity: -560,
   /** Highest falling speed; high enough that a normal fall keeps speeding up. */
   maxFallSpeed: 1000,
+  /** The upward speed a shielded falcon gets when it bounces off the sand. */
+  bounceVelocity: -620,
 } as const;
 
 /** The physics runs in fixed steps, so it behaves the same at any frame rate. */
@@ -58,6 +60,11 @@ export function flap(state: FalconState): FalconState {
 export function crash(state: FalconState): FalconState {
   if (state.phase === 'down') return state;
   return { ...state, phase: 'down', vy: 0, carry: 0 };
+}
+
+/** A shield took the hit on the sand: the falcon is back in the air just above the ground, moving up. */
+export function bounce(state: FalconState, bounds: FalconBounds): FalconState {
+  return { ...state, y: bounds.groundY - FALCON.radius, vy: FALCON.bounceVelocity, phase: 'flying' };
 }
 
 /** One step of `dt` seconds: gravity, then the ceiling and the ground. */

@@ -10,7 +10,7 @@ import {
 } from "../falcon/falconPhysics";
 import { type FalconView, createFalconView } from "../falcon/drawFalcon";
 import { createPressGate } from "../falcon/pressGate";
-import { DATE, type ObstacleKind } from "../obstacles/obstacleField";
+import { DATE, FEATHER, type ObstacleKind } from "../obstacles/obstacleField";
 import {
   type ObstacleView,
   createObstacleView,
@@ -20,6 +20,8 @@ import { type MuteButton, createMuteButton, publishSound } from "../audio/drawMu
 import { getSoundPlayer } from "../audio/soundPlayer";
 import { getLangStore } from "../i18n/langStore";
 import { getBestScoreStore } from "../score/bestScore";
+import { getBestMedalStore } from "../score/bestMedal";
+import { medalOf } from "../score/medals";
 import { type ScoreView, createScoreView } from "../score/drawScore";
 import { scoreOf } from "../score/runScore";
 import { scrollSpeedOf, speedLevelOf } from "../score/speedUp";
@@ -59,6 +61,10 @@ export interface ObstacleSnapshot {
   dateX: number;
   dateY: number;
   dateCaught: boolean;
+  /** The feather in the gap, if any (a gap never has both a date and a feather). */
+  featherX: number | null;
+  featherY: number | null;
+  featherCaught: boolean;
 }
 
 /**
@@ -98,6 +104,7 @@ export class FlightScene extends Phaser.Scene {
       this.bounds,
       options.seed ?? randomSeed(),
       options.obstacles,
+      options.feather,
     );
     this.obstacleView = createObstacleView(this, this.bounds.groundY);
     this.scoreView = createScoreView(this, getLangStore().get());
@@ -124,6 +131,8 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("runOver", false);
     this.registry.set("runOverReason", null);
     this.registry.set("gameOver", null);
+    this.registry.set("medal", null);
+    this.registry.set("bestMedal", getBestMedalStore().load());
     this.publish();
     this.registry.set("ready", true);
   }
@@ -136,6 +145,7 @@ export class FlightScene extends Phaser.Scene {
       if (this.run.passed > before.passed) this.sfx.play("point");
       if (this.run.dates > before.dates) this.sfx.play("date");
       this.obstacleView.sync(this.run.field);
+      this.view.setShield(this.run.shield);
       if (this.run.over) this.endRun(this.run.over);
       this.publish();
     }
@@ -176,6 +186,10 @@ export class FlightScene extends Phaser.Scene {
     const { best, isNewBest } = getBestScoreStore().record(scoreOf(this.run));
     const score = scoreOf(this.run);
     this.sfx.play("hit");
+    const medal = medalOf(score);
+    const { best: bestMedal, isNewBest: isNewMedal } = getBestMedalStore().record(medal);
+    this.registry.set("medal", medal);
+    this.registry.set("bestMedal", bestMedal);
     this.registry.set("runOver", true);
     this.registry.set("runOverReason", reason);
     this.events.emit(FlightScene.RUN_OVER, reason);
@@ -189,6 +203,9 @@ export class FlightScene extends Phaser.Scene {
           score,
           best,
           isNewBest,
+          medal,
+          bestMedal,
+          isNewMedal,
           lang: getLangStore().get(),
           onPlayAgain: () => this.scene.restart(),
         }),
@@ -213,7 +230,7 @@ export class FlightScene extends Phaser.Scene {
     };
     this.registry.set("falcon", snapshot);
     const obstacles: ObstacleSnapshot[] = (this.run.field?.obstacles ?? []).map(
-      ({ id, kind, x, width, gapTop, gapBottom, date }) => ({
+      ({ id, kind, x, width, gapTop, gapBottom, date, feather }) => ({
         id,
         kind,
         x,
@@ -223,11 +240,17 @@ export class FlightScene extends Phaser.Scene {
         dateX: x + DATE.offsetX,
         dateY: date.y,
         dateCaught: date.caught,
+        featherX: feather ? x + FEATHER.offsetX : null,
+        featherY: feather ? feather.y : null,
+        featherCaught: feather ? feather.caught : false,
       }),
     );
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
     this.registry.set("dates", this.run.dates);
+    this.registry.set("shield", this.run.shield);
+    this.registry.set("feathers", this.run.feathers);
+    this.registry.set("shieldDrawn", this.view.shieldShown());
     const score = scoreOf(this.run);
     this.scoreView.set(score);
     this.registry.set("score", score);
@@ -237,5 +260,6 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
     this.registry.set("datesDrawn", this.obstacleView.datesDrawn());
     publishSound(this, this.sfx);
+    this.registry.set("feathersDrawn", this.obstacleView.feathersDrawn());
   }
 }

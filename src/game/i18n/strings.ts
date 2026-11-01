@@ -11,6 +11,12 @@ export const STRINGS = {
     switchLanguage: 'العربية',
     mute: 'Sound off',
     unmute: 'Sound on',
+    medal: 'Medal',
+    bestMedal: 'Best medal',
+    noMedal: 'None',
+    bronze: 'Bronze',
+    silver: 'Silver',
+    gold: 'Gold',
   },
   ar: {
     title: 'صقر السماء',
@@ -23,6 +29,12 @@ export const STRINGS = {
     switchLanguage: 'English',
     mute: 'كتم الصوت',
     unmute: 'تشغيل الصوت',
+    medal: 'الميدالية',
+    bestMedal: 'أفضل ميدالية',
+    noMedal: 'لا شيء',
+    bronze: 'برونزية',
+    silver: 'فضية',
+    gold: 'ذهبية',
   },
 } as const;
 
