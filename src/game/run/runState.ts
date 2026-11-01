@@ -9,6 +9,8 @@ import {
 } from '../falcon/falconPhysics';
 import { falconHitsField, falconTouchesDate } from '../obstacles/collision';
 import { type ObstacleField, createField, stepField } from '../obstacles/obstacleField';
+import { scoreOf } from '../score/runScore';
+import { scrollSpeedOf } from '../score/speedUp';
 
 /**
  * One run: the falcon and the obstacles, moved together in fixed steps and checked for a hit on every step.
@@ -59,7 +61,7 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
   const falcon = stepFalcon(state.falcon, dt, bounds);
   if (!state.field) return falcon.phase === 'down' ? { ...state, falcon, over: 'ground' } : { ...state, falcon };
 
-  const moved = stepField(state.field, dt);
+  const moved = stepField(state.field, dt, scrollSpeedOf(scoreOf(state)));
   if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, moved)) {
     // A touch ends the run with no point for this step.
     return { falcon: crash(falcon), field: moved, passed: state.passed, dates: state.dates, over: 'obstacle' };

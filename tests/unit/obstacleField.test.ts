@@ -158,6 +158,15 @@ describe('gaps', () => {
   });
 });
 
+describe('stepField with a speed', () => {
+  it('moves obstacles by speed * dt, and by the starting speed when none is given', () => {
+    const field = stepField(createField(1, 749, 403), 0);
+    const x = field.obstacles[0].x;
+    expect(stepField(field, 0.5, 100).obstacles[0].x).toBeCloseTo(x - 50);
+    expect(stepField(field, 0.5).obstacles[0].x).toBeCloseTo(x - OBSTACLES.speed * 0.5);
+  });
+});
+
 describe('dates', () => {
   it('every obstacle has an uncaught date inside its gap, in the middle of the obstacle', () => {
     const all = collect(5, 30);
