@@ -2,7 +2,7 @@
 # Commit it as .github/workflows/releasehub-agent.yml on main, then add these repository secrets
 # (Settings > Secrets and variables > Actions):
 #   RELEASEHUB_RUNNER_SECRET: the agent's runner secret from ReleaseHub
-#   ANTHROPIC_API_KEY: an Anthropic API key (Claude Code)
+#   CLAUDE_CODE_OAUTH_TOKEN: a Claude Pro / Max subscription token (run `claude setup-token` signed in to the subscription and copy the token it prints)
 #   RELEASEHUB_GIT_TOKEN (recommended): a token that may push and open pull requests, so the pull
 #     request's own checks run (GitHub doesn't start workflows for changes pushed with the default token)
 name: ReleaseHub agent
@@ -84,7 +84,7 @@ jobs:
           #!/usr/bin/env bash
           # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
           set -euo pipefail
-          RH_SCRIPT_VERSION="568f5472b3da"
+          RH_SCRIPT_VERSION="913fb799f081"
           API="${RH_API%/}"
           EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
           WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
@@ -134,9 +134,10 @@ jobs:
             read -r ts sig <<<"$(sign "$body")"
             # From a file: Linux takes at most 128 KB in one argument, and a change's report carries its diff (up to 150 KB).
             printf '%s' "$body" > "$WORK/event.json"
-            code=$(curl -sS --retry 3 --retry-all-errors -o "$WORK/answer.json" -w '%{http_code}' -X POST "$EVENTS" \
+            # Six tries (about a minute) outlast a restart of ReleaseHub. Without an answer curl prints 000 itself.
+            code=$(curl -sS --retry 6 --retry-all-errors -o "$WORK/answer.json" -w '%{http_code}' -X POST "$EVENTS" \
               -H 'Content-Type: application/json' -H "tenant: $RH_TENANT" \
-              -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" --data-binary "@$WORK/event.json" || echo 000)
+              -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" --data-binary "@$WORK/event.json" || true)
             if [ "$code" = "409" ] || [ "$code" = "410" ]; then
               echo "ReleaseHub: $(cat "$WORK/answer.json" 2>/dev/null)"
               echo "The run moved on; stopping."
@@ -212,9 +213,9 @@ jobs:
           fetch_context() {
             local ts sig code
             read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH")"
-            code=$(curl -sS --retry 3 --retry-all-errors -o "$WORK/context.json" -w '%{http_code}' \
+            code=$(curl -sS --retry 6 --retry-all-errors -o "$WORK/context.json" -w '%{http_code}' \
               "$API/api/v1/ai/runner/runs/$RH_RUN/context?dispatch=$RH_DISPATCH" \
-              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
             case "$code" in
               2*) ;;
               409|410) echo "The run moved on; stopping."; exit 0 ;;
@@ -255,7 +256,7 @@ jobs:
               safe=$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_' | cut -c1-80)
               read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.$i")"
               code=$(curl -sS --retry 2 -o "$FILES_DIR/$i-$safe" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/files/$i?dispatch=$RH_DISPATCH" \
-                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
               if [ "${code:0:1}" = "2" ]; then
                 printf -- '- %s/%s-%s (%s: %s)\n' "$FILES_DIR" "$i" "$safe" "$(jq -r '.kind' <<<"$file")" "$name" >> "$WORK/files.txt"
               else
@@ -317,7 +318,7 @@ jobs:
             local ts sig code id folder here
             read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.session")"
             code=$(curl -sS --retry 2 -D "$WORK/session.h" -o "$WORK/session.gz" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/session?dispatch=$RH_DISPATCH" \
-              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
             [ "${code:0:1}" = "2" ] || return 0
             id=$(grep -i '^x-releasehub-session-id:' "$WORK/session.h" | cut -d' ' -f2- | tr -d '\r')
             # Another run's conversation, continued as a copy: the original stays as it was.
@@ -505,7 +506,7 @@ jobs:
             local ts sig code
             read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.kit")"
             code=$(curl -sS --retry 2 -o "$WORK/kit.tgz" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/preview-kit?dispatch=$RH_DISPATCH" \
-              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
             if [ "${code:0:1}" = "2" ] && tar -xzf "$WORK/kit.tgz" -C "$KIT_DIR" --no-same-owner 2>/dev/null; then
               log "Restored the preview kit earlier runs made for this app."
             fi
@@ -539,7 +540,7 @@ jobs:
               read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.screenshot.$name.$sha")"
               code=$(curl -sS --retry 2 -o /dev/null -w '%{http_code}' -X POST "$API/api/v1/ai/runner/runs/$RH_RUN/screenshots?dispatch=$RH_DISPATCH&name=$name" \
                 -H 'Content-Type: application/octet-stream' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
-                -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$f" || echo 000)
+                -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$f" || true)
               [ "${code:0:1}" = "2" ] && sent=$((sent + 1))
             done < <(find "$SHOTS_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) | sort | head -40)
             rm -rf "$SHOTS_DIR"
@@ -2680,19 +2681,20 @@ jobs:
             log "Waiting up to $minutes minutes for the next decision, so the next stage can start here without a new job."
             while [ "$SECONDS" -lt "$until" ]; do
               read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.next")"
+              # No answer (000, ReleaseHub restarting) means ask again, not leave.
               code=$(curl -sS -m 70 -o "$WORK/next.json" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/next?dispatch=$RH_DISPATCH&wait=40" \
-                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+                -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
               case "$code" in
                 200) take_next; return 0 ;;
                 204) ;;
-                000|5*) sleep 5 ;;
+                000|""|5*) sleep 5 ;;
                 *) return 1 ;;
               esac
             done
             # Time is up. A stage handed over at the last moment still comes back here.
             read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.next")"
             code=$(curl -sS -m 30 -X POST -o "$WORK/next.json" -w '%{http_code}' "$API/api/v1/ai/runner/runs/$RH_RUN/next?dispatch=$RH_DISPATCH" \
-              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || echo 000)
+              -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" || true)
             if [ "$code" = "200" ]; then take_next; return 0; fi
             return 1
           }
