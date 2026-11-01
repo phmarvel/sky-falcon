@@ -9,6 +9,12 @@ export const STRINGS = {
     playAgain: 'Play again',
     newBest: 'New best!',
     switchLanguage: 'العربية',
+    medal: 'Medal',
+    bestMedal: 'Best medal',
+    noMedal: 'None',
+    bronze: 'Bronze',
+    silver: 'Silver',
+    gold: 'Gold',
   },
   ar: {
     title: 'صقر السماء',
@@ -19,6 +25,12 @@ export const STRINGS = {
     playAgain: 'العب مرة أخرى',
     newBest: 'رقم قياسي جديد!',
     switchLanguage: 'English',
+    medal: 'الميدالية',
+    bestMedal: 'أفضل ميدالية',
+    noMedal: 'لا شيء',
+    bronze: 'برونزية',
+    silver: 'فضية',
+    gold: 'ذهبية',
   },
 } as const;
 

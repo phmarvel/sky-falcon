@@ -1,25 +1,31 @@
 import Phaser from "phaser";
 import { COLORS, GAME_HEIGHT, GAME_WIDTH, UI } from "../constants";
 import { createPressGate } from "../falcon/pressGate";
+import { drawMedal } from "./drawMedal";
+import type { Medal } from "../score/medals";
 import { type Lang, directionOf, formatNumber, t } from "../i18n/strings";
 
 /** Seconds of scene time before Play again reacts, so the tap that ended the run cannot restart it. */
 export const PLAY_AGAIN_GUARD_MS = 400;
 
-const PANEL = { width: 440, height: 520, top: 220 };
+const PANEL = { width: 440, height: 680, top: 60 };
 const BUTTON = { x: GAME_WIDTH / 2, y: 665, width: 330, height: 88 };
 
 export interface GameOverInfo {
   score: number;
   best: number;
   isNewBest: boolean;
+  /** The medal won in this run, and the best one ever won on this device. */
+  medal: Medal | null;
+  bestMedal: Medal | null;
+  isNewMedal: boolean;
   lang: Lang;
   onPlayAgain: () => void;
 }
 
 /** The game over screen: score, best score and Play again, drawn over the run at depth 100. */
 export function showGameOver(scene: Phaser.Scene, info: GameOverInfo): void {
-  const { score, best, isNewBest, lang } = info;
+  const { score, best, isNewBest, medal, bestMedal, isNewMedal, lang } = info;
   const rtl = directionOf(lang) === "rtl";
   const depth = 100;
   const objects: Phaser.GameObjects.GameObject[] = [];
@@ -27,11 +33,17 @@ export function showGameOver(scene: Phaser.Scene, info: GameOverInfo): void {
   let ready = false;
   let done = false;
 
+  const medalText = medal ? `${t(lang, "medal")}: ${t(lang, medal)}` : "";
+  const bestMedalText = `${t(lang, "bestMedal")}: ${bestMedal ? t(lang, bestMedal) : t(lang, "noMedal")}`;
+
   const publish = () =>
     scene.registry.set("gameOver", {
       score,
       best,
       isNewBest,
+      medal,
+      bestMedal,
+      isNewMedal,
       lang,
       dir: directionOf(lang),
       ready,
@@ -39,6 +51,8 @@ export function showGameOver(scene: Phaser.Scene, info: GameOverInfo): void {
         title: t(lang, "gameOver"),
         score: `${t(lang, "score")}: ${formatNumber(score, lang)}`,
         bestScore: `${t(lang, "bestScore")}: ${formatNumber(best, lang)}`,
+        medal: medalText,
+        bestMedal: bestMedalText,
         playAgain: t(lang, "playAgain"),
       },
       ui: { ...BUTTON },
@@ -100,17 +114,29 @@ export function showGameOver(scene: Phaser.Scene, info: GameOverInfo): void {
       .setOrigin(0.5)
       .setDepth(depth + 1);
     objects.push(label);
+    return label;
   };
-  text(290, t(lang, "gameOver"), 56, UI.panelText);
-  text(370, t(lang, "score"), 32, UI.panelText);
-  text(440, formatNumber(score, lang), 88, UI.panelText);
+  text(130, t(lang, "gameOver"), 56, UI.panelText);
+  text(205, t(lang, "score"), 32, UI.panelText);
+  text(275, formatNumber(score, lang), 88, UI.panelText);
+  if (medal) {
+    // The medal won in this run; with fewer points than the bronze threshold nothing is drawn here.
+    drawMedal(g, GAME_WIDTH / 2, 365, medal, 36);
+    text(443, medalText, 32, UI.panelText);
+  }
   text(
-    530,
+    493,
     `${t(lang, "bestScore")}: ${formatNumber(best, lang)}`,
     36,
     UI.panelText,
   );
-  if (isNewBest) text(582, t(lang, "newBest"), 32, UI.newBest);
+  if (isNewBest) text(530, t(lang, "newBest"), 28, UI.newBest);
+  const row = text(578, bestMedalText, 30, UI.panelText);
+  if (bestMedal) {
+    // The icon sits before the text: left in LTR, right in RTL.
+    const gap = row.width / 2 + 30;
+    drawMedal(g, GAME_WIDTH / 2 + (rtl ? gap : -gap), 572, bestMedal, 16);
+  }
   text(BUTTON.y - 2, t(lang, "playAgain"), 40, UI.buttonText);
 
   const play = () => {
