@@ -28,6 +28,17 @@ import { scrollSpeedOf, speedLevelOf } from "../score/speedUp";
 import { showGameOver } from "../ui/GameOverScreen";
 import { autopilotWantsFlap } from "../run/autopilot";
 import {
+  type PauseState,
+  countdownNumber,
+  createPause,
+  isFrozen,
+  pause,
+  tickPause,
+  toggle,
+} from "../run/pauseState";
+import { createPauseButton } from "../ui/drawPauseButton";
+import { type PauseOverlay, createPauseOverlay } from "../ui/PauseOverlay";
+import {
   type RunOverReason,
   type RunState,
   advanceRun,
@@ -87,6 +98,10 @@ export class FlightScene extends Phaser.Scene {
   private bounds!: FalconBounds;
   private readonly keys = createPressGate();
   private autopilot = false;
+  private pauseState: PauseState = createPause();
+  private pauseOverlay!: PauseOverlay;
+  /** `?pause=1`: pause on the first frame after the opening flap. */
+  private pauseAtStart = false;
 
   constructor() {
     super(FlightScene.KEY);
@@ -99,6 +114,8 @@ export class FlightScene extends Phaser.Scene {
     this.bounds = { top: 0, groundY: layout.horizonY };
     const options = parseRunOptions(window.location.search);
     this.autopilot = options.autopilot;
+    this.pauseState = createPause();
+    this.pauseAtStart = options.pause;
     this.run = createRun(
       createFalcon(),
       this.bounds,
@@ -110,6 +127,9 @@ export class FlightScene extends Phaser.Scene {
     this.scoreView = createScoreView(this, getLangStore().get());
     this.view = createFalconView(this, this.bounds.groundY);
     this.mute = createMuteButton(this, getLangStore().get(), "flight", this.sfx);
+    createPauseButton(this, getLangStore().get(), () => this.togglePause());
+    this.pauseOverlay = createPauseOverlay(this, () => this.resumeRun());
+    this.syncPause();
     this.view.update(this.run.falcon, this.time.now);
 
     // Pointer covers the mouse and touch; Phaser stops the browser's copied mouse events after a touch.
@@ -120,10 +140,20 @@ export class FlightScene extends Phaser.Scene {
       keyboard.on("keydown-SPACE", this.onSpaceDown, this);
       keyboard.on("keyup-SPACE", this.onSpaceUp, this);
       keyboard.on("keydown-M", this.onMuteKey, this);
+      keyboard.on("keydown-P", this.onPauseKey, this);
+      keyboard.on("keydown-ESC", this.onPauseKey, this);
     }
+    // The tab going away pauses the run; coming back leaves the overlay up (no auto-resume).
+    document.addEventListener("visibilitychange", this.onVisibility);
+    window.addEventListener("blur", this.onBlur);
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
       this.stopInput();
       this.input.keyboard?.off("keydown-M", this.onMuteKey, this);
+      this.input.keyboard?.off("keydown-P", this.onPauseKey, this);
+      this.input.keyboard?.off("keydown-ESC", this.onPauseKey, this);
+      document.removeEventListener("visibilitychange", this.onVisibility);
+      window.removeEventListener("blur", this.onBlur);
+      this.tweens.resumeAll();
     });
 
     this.registry.set("ready", false);
@@ -138,6 +168,19 @@ export class FlightScene extends Phaser.Scene {
   }
 
   update(time: number, delta: number): void {
+    if (this.pauseAtStart && this.run.falcon.phase === "ready") this.onFlap();
+    else if (this.pauseAtStart) {
+      this.pauseAtStart = false;
+      this.pauseRun();
+    }
+    if (isFrozen(this.pauseState)) {
+      // Frozen: the run does not step. Only the countdown moves (in game time), then the tweens go on.
+      this.pauseState = tickPause(this.pauseState, delta / 1000);
+      if (!isFrozen(this.pauseState)) this.tweens.resumeAll();
+      this.syncPause();
+      this.view.update(this.run.falcon, time);
+      return;
+    }
     if (this.autopilot && autopilotWantsFlap(this.run)) this.onFlap();
     if (this.run.falcon.phase === "flying") {
       const before = this.run;
@@ -164,13 +207,61 @@ export class FlightScene extends Phaser.Scene {
     if (!event.repeat) this.mute.toggle();
   }
 
+  private onPauseKey(event: KeyboardEvent): void {
+    if (!event.repeat) this.togglePause();
+  }
+
+  private readonly onVisibility = (): void => {
+    if (document.hidden) this.pauseRun();
+  };
+
+  private readonly onBlur = (): void => {
+    this.pauseRun();
+  };
+
+  /** Only a run in flight can be paused: not before the first flap, not once it is over. */
+  private canPause(): boolean {
+    return this.run.falcon.phase === "flying" && !this.run.over;
+  }
+
+  private pauseRun(): void {
+    if (!this.canPause()) return;
+    const next = pause(this.pauseState);
+    if (next === this.pauseState) return;
+    this.pauseState = next;
+    this.tweens.pauseAll();
+    this.syncPause();
+  }
+
+  /** Resume starts the 3-2-1 countdown (from the button, P/Escape or a tap on the overlay). */
+  private resumeRun(): void {
+    if (this.pauseState.mode !== "paused") return;
+    this.pauseState = toggle(this.pauseState);
+    this.syncPause();
+  }
+
+  private togglePause(): void {
+    if (this.pauseState.mode === "running") this.pauseRun();
+    else this.resumeRun();
+  }
+
+  /** Shows the overlay for the state and shares `paused` / `countdown` with the browser tests. */
+  private syncPause(): void {
+    const count = countdownNumber(this.pauseState);
+    this.pauseOverlay.show(this.pauseState.mode, count, getLangStore().get());
+    this.registry.set("paused", isFrozen(this.pauseState));
+    this.registry.set("pauseMode", this.pauseState.mode);
+    this.registry.set("countdown", count);
+    this.registry.set("pauseTexts", this.pauseOverlay.texts());
+  }
+
   /** A press on the mute button (an interactive object under the pointer) is not a flap. */
   private onPointer(_pointer: Phaser.Input.Pointer, over: unknown[]): void {
-    if (over.length === 0) this.onFlap();
+    if (over.length === 0 && !isFrozen(this.pauseState)) this.onFlap();
   }
 
   private onFlap(): void {
-    if (this.run.over || this.run.falcon.phase === "down") return;
+    if (this.run.over || this.run.falcon.phase === "down" || isFrozen(this.pauseState)) return;
     this.sfx.unlock();
     this.sfx.play("flap");
     this.run = { ...this.run, falcon: flap(this.run.falcon) };
@@ -248,6 +339,8 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("obstacles", obstacles);
     this.registry.set("passed", this.run.passed);
     this.registry.set("dates", this.run.dates);
+    this.registry.set("paused", isFrozen(this.pauseState));
+    this.registry.set("countdown", countdownNumber(this.pauseState));
     this.registry.set("shield", this.run.shield);
     this.registry.set("feathers", this.run.feathers);
     this.registry.set("shieldDrawn", this.view.shieldShown());
