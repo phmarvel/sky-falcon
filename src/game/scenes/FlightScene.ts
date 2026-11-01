@@ -16,6 +16,8 @@ import {
   createObstacleView,
 } from "../obstacles/drawObstacles";
 import { randomSeed } from "../obstacles/random";
+import { type MuteButton, createMuteButton, publishSound } from "../audio/drawMuteButton";
+import { getSoundPlayer } from "../audio/soundPlayer";
 import { getLangStore } from "../i18n/langStore";
 import { getBestScoreStore } from "../score/bestScore";
 import { getBestMedalStore } from "../score/bestMedal";
@@ -80,6 +82,8 @@ export class FlightScene extends Phaser.Scene {
   private view!: FalconView;
   private obstacleView!: ObstacleView;
   private scoreView!: ScoreView;
+  private mute!: MuteButton;
+  private readonly sfx = getSoundPlayer();
   private bounds!: FalconBounds;
   private readonly keys = createPressGate();
   private autopilot = false;
@@ -105,17 +109,22 @@ export class FlightScene extends Phaser.Scene {
     this.obstacleView = createObstacleView(this, this.bounds.groundY);
     this.scoreView = createScoreView(this, getLangStore().get());
     this.view = createFalconView(this, this.bounds.groundY);
+    this.mute = createMuteButton(this, getLangStore().get(), "flight", this.sfx);
     this.view.update(this.run.falcon, this.time.now);
 
     // Pointer covers the mouse and touch; Phaser stops the browser's copied mouse events after a touch.
-    this.input.on(Phaser.Input.Events.POINTER_DOWN, this.onFlap, this);
+    this.input.on(Phaser.Input.Events.POINTER_DOWN, this.onPointer, this);
     const keyboard = this.input.keyboard;
     if (keyboard) {
       keyboard.addCapture("SPACE");
       keyboard.on("keydown-SPACE", this.onSpaceDown, this);
       keyboard.on("keyup-SPACE", this.onSpaceUp, this);
+      keyboard.on("keydown-M", this.onMuteKey, this);
     }
-    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => this.stopInput());
+    this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      this.stopInput();
+      this.input.keyboard?.off("keydown-M", this.onMuteKey, this);
+    });
 
     this.registry.set("ready", false);
     this.registry.set("screen", "flight");
@@ -131,7 +140,10 @@ export class FlightScene extends Phaser.Scene {
   update(time: number, delta: number): void {
     if (this.autopilot && autopilotWantsFlap(this.run)) this.onFlap();
     if (this.run.falcon.phase === "flying") {
+      const before = this.run;
       this.run = advanceRun(this.run, delta, this.bounds);
+      if (this.run.passed > before.passed) this.sfx.play("point");
+      if (this.run.dates > before.dates) this.sfx.play("date");
       this.obstacleView.sync(this.run.field);
       this.view.setShield(this.run.shield);
       if (this.run.over) this.endRun(this.run.over);
@@ -148,8 +160,19 @@ export class FlightScene extends Phaser.Scene {
     this.keys.up("SPACE");
   }
 
+  private onMuteKey(event: KeyboardEvent): void {
+    if (!event.repeat) this.mute.toggle();
+  }
+
+  /** A press on the mute button (an interactive object under the pointer) is not a flap. */
+  private onPointer(_pointer: Phaser.Input.Pointer, over: unknown[]): void {
+    if (over.length === 0) this.onFlap();
+  }
+
   private onFlap(): void {
     if (this.run.over || this.run.falcon.phase === "down") return;
+    this.sfx.unlock();
+    this.sfx.play("flap");
     this.run = { ...this.run, falcon: flap(this.run.falcon) };
     this.view.flapWing();
     this.publish();
@@ -162,6 +185,7 @@ export class FlightScene extends Phaser.Scene {
     if (reason === "obstacle") this.view.fallFrom(this.run.falcon.y);
     const { best, isNewBest } = getBestScoreStore().record(scoreOf(this.run));
     const score = scoreOf(this.run);
+    this.sfx.play("hit");
     const medal = medalOf(score);
     const { best: bestMedal, isNewBest: isNewMedal } = getBestMedalStore().record(medal);
     this.registry.set("medal", medal);
@@ -189,7 +213,7 @@ export class FlightScene extends Phaser.Scene {
   }
 
   private stopInput(): void {
-    this.input.off(Phaser.Input.Events.POINTER_DOWN, this.onFlap, this);
+    this.input.off(Phaser.Input.Events.POINTER_DOWN, this.onPointer, this);
     this.input.keyboard?.off("keydown-SPACE", this.onSpaceDown, this);
     this.input.keyboard?.off("keyup-SPACE", this.onSpaceUp, this);
   }
@@ -235,6 +259,7 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("scrollSpeed", scrollSpeedOf(score));
     this.registry.set("obstaclesDrawn", this.obstacleView.count());
     this.registry.set("datesDrawn", this.obstacleView.datesDrawn());
+    publishSound(this, this.sfx);
     this.registry.set("feathersDrawn", this.obstacleView.feathersDrawn());
   }
 }

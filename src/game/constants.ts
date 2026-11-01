@@ -54,6 +54,12 @@ export const COLORS = {
 /** Draw order of the score: above the obstacles (0) and the falcon (10), under the game over screen (100). */
 export const SCORE_DEPTH = 50;
 
+/** Draw order of buttons on the screens (the mute button): above the score, under the game over screen (100). */
+export const UI_DEPTH = 60;
+
+/** The mute button: a square in a top corner. The slot of the same size next to it is kept for a pause button. */
+export const MUTE = { size: 56, margin: 16, y: 60 } as const;
+
 /** Text styles for the screens. */
 export const UI = {
   fontFamily: 'system-ui, "Segoe UI", Tahoma, Arial, sans-serif',
