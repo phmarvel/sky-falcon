@@ -25,7 +25,7 @@ test.beforeEach(async ({ page, browserName }) => {
 });
 
 async function open(page: Page, query: string) {
-  await page.goto(`./?scene=flight&${query}`);
+  await page.goto(`./?scene=flight&${query}&feather=off`);
   await expect(page.locator("#game canvas").first()).toBeVisible();
   await page.waitForFunction(
     () => window.__SKY_FALCON__?.registry.get("ready") === true,

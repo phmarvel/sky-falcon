@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { circleHitsCircle, circleHitsRect, falconHitsField, falconTouchesDate } from '../../src/game/obstacles/collision';
-import { DATE, type Obstacle, createField } from '../../src/game/obstacles/obstacleField';
+import { circleHitsCircle, circleHitsRect, falconHitsField, falconTouchesDate, falconTouchesFeather } from '../../src/game/obstacles/collision';
+import { DATE, FEATHER, type Obstacle, createField } from '../../src/game/obstacles/obstacleField';
 import { SHAPES, obstacleParts } from '../../src/game/obstacles/obstacleShapes';
 
 const rect = { x: 100, y: 100, width: 50, height: 80 };
@@ -124,5 +124,32 @@ describe('dates', () => {
 
   it('a caught date can not be touched again', () => {
     expect(falconTouchesDate(dx, 215, 22, o(true))).toBe(false);
+  });
+});
+
+describe('feathers and absorbed hits', () => {
+  const o: Obstacle = {
+    id: 1,
+    kind: 'tower',
+    x: 140,
+    width: 84,
+    gapTop: 200,
+    gapBottom: 430,
+    passed: false,
+    date: { y: 315, caught: true },
+    feather: { y: 315, caught: false },
+  };
+
+  it('touches a feather only while it is not caught', () => {
+    expect(falconTouchesFeather(140 + FEATHER.offsetX, 315, 22, o)).toBe(true);
+    expect(falconTouchesFeather(140 + FEATHER.offsetX, 315 + 22 + FEATHER.radius + 1, 22, o)).toBe(false);
+    expect(falconTouchesFeather(140 + FEATHER.offsetX, 315, 22, { ...o, feather: { y: 315, caught: true } })).toBe(false);
+    expect(falconTouchesFeather(140 + FEATHER.offsetX, 315, 22, { ...o, feather: null })).toBe(false);
+  });
+
+  it('an obstacle that took a shielded hit no longer hits', () => {
+    const f = { ...createField(1, GROUND, 400), obstacles: [o] };
+    expect(falconHitsField(162, 205, 22, f)).toBe(true);
+    expect(falconHitsField(162, 205, 22, { ...f, obstacles: [{ ...o, hitAbsorbed: true }] })).toBe(false);
   });
 });

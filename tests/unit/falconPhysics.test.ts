@@ -6,6 +6,7 @@ import {
   MIN_TILT,
   STEP_SECONDS,
   advanceFalcon,
+  bounce,
   createFalcon,
   type FalconState,
   falconTilt,
@@ -156,5 +157,16 @@ describe('falconTilt', () => {
       expect(t).toBeGreaterThanOrEqual(MIN_TILT);
       expect(t).toBeLessThanOrEqual(MAX_TILT);
     }
+  });
+});
+
+describe('bounce', () => {
+  it('puts the falcon back in the air just above the ground, moving up', () => {
+    const down: FalconState = { ...flying(bounds.groundY), phase: 'down' };
+    const up = bounce(down, bounds);
+    expect(up.phase).toBe('flying');
+    expect(up.y).toBe(bounds.groundY - FALCON.radius);
+    expect(up.vy).toBe(FALCON.bounceVelocity);
+    expect(stepFalcon(up, STEP_SECONDS, bounds).y).toBeLessThan(up.y);
   });
 });

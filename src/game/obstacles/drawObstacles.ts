@@ -1,6 +1,6 @@
 import Phaser from 'phaser';
 import { COLORS } from '../constants';
-import { DATE, type Obstacle, type ObstacleField } from './obstacleField';
+import { DATE, FEATHER, type Obstacle, type ObstacleField } from './obstacleField';
 import { type Part, obstacleParts } from './obstacleShapes';
 
 /** Above the background (-100), below the falcon (10). */
@@ -16,6 +16,8 @@ export interface ObstacleView {
   count(): number;
   /** How many dates are drawn now (caught ones are gone). */
   datesDrawn(): number;
+  /** How many feathers are drawn now (taken ones are gone). */
+  feathersDrawn(): number;
 }
 
 function drawTowerPart(g: Phaser.GameObjects.Graphics, p: Part, groundY: number): void {
@@ -135,9 +137,31 @@ function drawDate(g: Phaser.GameObjects.Graphics): void {
   g.lineBetween(0, -ry, 3, -ry - 5);
 }
 
+/** A golden feather: a slanted quill with a light vane and a darker shaft, centred on (0, 0). */
+function drawFeather(g: Phaser.GameObjects.Graphics): void {
+  const r = FEATHER.radius;
+  const vane = [
+    { x: -r * 0.7, y: r },
+    { x: -r * 0.55, y: r * 0.1 },
+    { x: -r * 0.1, y: -r * 0.7 },
+    { x: r * 0.55, y: -r },
+    { x: r * 0.5, y: -r * 0.1 },
+    { x: r * 0.1, y: r * 0.5 },
+  ];
+  g.fillStyle(COLORS.featherGold, 1);
+  g.fillPoints(vane, true);
+  g.fillStyle(COLORS.featherLight, 1);
+  g.fillTriangle(-r * 0.1, -r * 0.7, r * 0.55, -r, r * 0.2, -r * 0.15);
+  g.lineStyle(2, COLORS.featherOutline, 1);
+  g.strokePoints(vane, true);
+  g.lineStyle(2.5, COLORS.featherShaft, 1);
+  g.lineBetween(-r * 0.8, r * 1.15, r * 0.5, -r * 0.95);
+}
+
 interface Shown {
   container: Phaser.GameObjects.Container;
   date: Phaser.GameObjects.Graphics | null;
+  feather: Phaser.GameObjects.Graphics | null;
 }
 
 function drawObstacle(scene: Phaser.Scene, o: Obstacle, groundY: number): Shown {
@@ -149,8 +173,16 @@ function drawObstacle(scene: Phaser.Scene, o: Obstacle, groundY: number): Shown 
   const date = scene.add.graphics();
   drawDate(date);
   date.setPosition(DATE.offsetX, o.date.y);
-  const container = scene.add.container(Math.round(o.x), 0, [g, date]).setDepth(OBSTACLE_DEPTH);
-  return { container, date: o.date.caught ? null : date };
+  const items = [g, date];
+  let feather: Phaser.GameObjects.Graphics | null = null;
+  if (o.feather && !o.feather.caught) {
+    feather = scene.add.graphics();
+    drawFeather(feather);
+    feather.setPosition(FEATHER.offsetX, o.feather.y);
+    items.push(feather);
+  }
+  const container = scene.add.container(Math.round(o.x), 0, items).setDepth(OBSTACLE_DEPTH);
+  return { container, date: o.date.caught ? null : date, feather };
 }
 
 /** The towers and palm trees: each drawn once, then only moved; removed once it leaves the field. */
@@ -168,6 +200,10 @@ export function createObstacleView(scene: Phaser.Scene, groundY: number): Obstac
             existing.date.destroy();
             existing.date = null;
           }
+          if (o.feather?.caught && existing.feather) {
+            existing.feather.destroy();
+            existing.feather = null;
+          }
         } else {
           const made = drawObstacle(scene, o, groundY);
           if (o.date.caught) made.date?.destroy();
@@ -181,6 +217,11 @@ export function createObstacleView(scene: Phaser.Scene, groundY: number): Obstac
       }
     },
     count: () => shown.size,
+    feathersDrawn() {
+      let n = 0;
+      for (const item of shown.values()) if (item.feather) n++;
+      return n;
+    },
     datesDrawn() {
       let n = 0;
       for (const item of shown.values()) if (item.date) n++;

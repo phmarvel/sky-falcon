@@ -4,11 +4,12 @@ import {
   type FalconState,
   MAX_FRAME_MS,
   STEP_SECONDS,
+  bounce,
   crash,
   stepFalcon,
 } from '../falcon/falconPhysics';
-import { falconHitsField, falconTouchesDate } from '../obstacles/collision';
-import { type ObstacleField, createField, stepField } from '../obstacles/obstacleField';
+import { falconTouchesDate, falconTouchesFeather, obstaclesHit } from '../obstacles/collision';
+import { type FeatherMode, type ObstacleField, createField, stepField } from '../obstacles/obstacleField';
 import { scoreOf } from '../score/runScore';
 import { scrollSpeedOf } from '../score/speedUp';
 
@@ -27,6 +28,10 @@ export interface RunState {
   passed: number;
   /** How many dates the falcon has caught. */
   dates: number;
+  /** True while a golden feather protects the falcon: the next hit (obstacle or sand) is absorbed once. */
+  shield: boolean;
+  /** How many feathers gave a shield in this run (one caught while shielded does nothing and is not counted). */
+  feathers: number;
 }
 
 export interface RunOptions {
@@ -35,21 +40,40 @@ export interface RunOptions {
   seed: number | undefined;
   /** The game plays itself (a demo, for screenshots). */
   autopilot: boolean;
+  /** Feathers: 'rare' (seeded), 'always' (every gap after the first) or 'off'. */
+  feather: FeatherMode;
 }
 
 /**
  * Reads the run settings from the page address: `?seed=7` gives the same obstacles every time, `?obstacles=off` flies
- * without them, `?autopilot=1` lets the game play itself.
+ * without them, `?autopilot=1` lets the game play itself,
+ * `?feather=always|off` puts a feather in every gap or in none (rare and seeded otherwise).
  */
 export function parseRunOptions(search: string): RunOptions {
   const params = new URLSearchParams(search);
   const seedText = params.get('seed');
   const seed = seedText !== null && /^-?\d+$/.test(seedText.trim()) ? Number(seedText) : undefined;
-  return { obstacles: params.get('obstacles') !== 'off', seed, autopilot: params.get('autopilot') === '1' };
+  const featherText = params.get('feather');
+  const feather: FeatherMode = featherText === 'always' || featherText === 'off' ? featherText : 'rare';
+  return { obstacles: params.get('obstacles') !== 'off', seed, autopilot: params.get('autopilot') === '1', feather };
 }
 
-export function createRun(falcon: FalconState, bounds: FalconBounds, seed: number, obstacles = true): RunState {
-  return { falcon, field: obstacles ? createField(seed, bounds.groundY, falcon.y) : null, over: null, passed: 0, dates: 0 };
+export function createRun(
+  falcon: FalconState,
+  bounds: FalconBounds,
+  seed: number,
+  obstacles = true,
+  feather: FeatherMode = 'rare',
+): RunState {
+  return {
+    falcon,
+    field: obstacles ? createField(seed, bounds.groundY, falcon.y, feather) : null,
+    over: null,
+    passed: 0,
+    dates: 0,
+    shield: false,
+    feathers: 0,
+  };
 }
 
 /** The x the falcon's back edge sits at: an obstacle whose right edge is left of it has been passed. */
@@ -58,16 +82,31 @@ const PASS_LINE = FALCON.x - FALCON.radius;
 /** One fixed step of `dt` seconds: the falcon, then the obstacles, then the hit check. */
 export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunState {
   if (state.over || state.falcon.phase !== 'flying') return state;
-  const falcon = stepFalcon(state.falcon, dt, bounds);
-  if (!state.field) return falcon.phase === 'down' ? { ...state, falcon, over: 'ground' } : { ...state, falcon };
+  let falcon = stepFalcon(state.falcon, dt, bounds);
+  let shield = state.shield;
+  // The sand with a shield: the shield breaks and the falcon bounces up; the run goes on.
+  if (falcon.phase === 'down' && shield) {
+    falcon = bounce(falcon, bounds);
+    shield = false;
+  }
+  if (!state.field) {
+    return falcon.phase === 'down' ? { ...state, falcon, shield, over: 'ground' } : { ...state, falcon, shield };
+  }
 
-  const moved = stepField(state.field, dt, scrollSpeedOf(scoreOf(state)));
-  if (falconHitsField(FALCON.x, falcon.y, FALCON.radius, moved)) {
-    // A touch ends the run with no point for this step.
-    return { falcon: crash(falcon), field: moved, passed: state.passed, dates: state.dates, over: 'obstacle' };
+  let moved = stepField(state.field, dt, scrollSpeedOf(scoreOf(state)));
+  const hits = obstaclesHit(FALCON.x, falcon.y, FALCON.radius, moved);
+  if (hits.length > 0) {
+    if (!shield) {
+      // A touch ends the run with no point for this step.
+      return { ...state, falcon: crash(falcon), field: moved, shield, over: 'obstacle' };
+    }
+    // The shield takes the hit: it breaks, and these obstacles can't hit the falcon again.
+    shield = false;
+    moved = { ...moved, obstacles: moved.obstacles.map((o) => (hits.includes(o) ? { ...o, hitAbsorbed: true } : o)) };
   }
   let passed = state.passed;
   let dates = state.dates;
+  let feathers = state.feathers;
   const field: ObstacleField = {
     ...moved,
     obstacles: moved.obstacles.map((o) => {
@@ -76,13 +115,20 @@ export function stepRun(state: RunState, dt: number, bounds: FalconBounds): RunS
         dates++;
         o = { ...o, date: { ...o.date, caught: true } };
       }
+      // A feather is taken once. It gives a shield only when there is none; no points either way.
+      if (o.feather && falconTouchesFeather(FALCON.x, falcon.y, FALCON.radius, o)) {
+        if (!shield) {
+          shield = true;
+          feathers++;
+        }
+        o = { ...o, feather: { ...o.feather, caught: true } };
+      }
       if (o.passed || o.x + o.width >= PASS_LINE) return o;
       passed++;
       return { ...o, passed: true };
     }),
   };
-  if (falcon.phase === 'down') return { falcon, field, passed, dates, over: 'ground' };
-  return { falcon, field, passed, dates, over: null };
+  return { falcon, field, passed, dates, shield, feathers, over: falcon.phase === 'down' ? 'ground' : null };
 }
 
 /** Moves the run on by one frame of `elapsedMs` (capped at MAX_FRAME_MS), in fixed steps; stops at the first hit. */

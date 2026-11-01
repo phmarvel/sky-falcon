@@ -12,7 +12,7 @@ interface Sample {
 }
 
 test('the game speeds up at 10 points and not in between', async ({ page }) => {
-  await page.goto('./?scene=flight&seed=3&autopilot=1');
+  await page.goto('./?scene=flight&seed=3&autopilot=1&feather=off');
   await expect(page.locator('#game canvas').first()).toBeVisible();
   await page.waitForFunction(() => window.__SKY_FALCON__?.registry.get('ready') === true, undefined, {
     timeout: 60_000,

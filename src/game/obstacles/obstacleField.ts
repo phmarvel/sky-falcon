@@ -1,5 +1,5 @@
 import { GAME_WIDTH } from '../constants';
-import { randomStep } from './random';
+import { hashUnit, randomStep } from './random';
 
 /**
  * The towers and palm trees: where they are, how they move and where their gaps are.
@@ -34,6 +34,30 @@ export const DATE = {
   offsetX: OBSTACLES.width / 2,
 } as const;
 
+/** The golden feather: floats in the middle of some gaps (instead of the date) and shields the falcon from one hit. */
+export const FEATHER = {
+  radius: 18,
+  /** Distance from the obstacle's left edge to the feather's centre, as for the date. */
+  offsetX: DATE.offsetX,
+  /** Share of gaps that hold a feather when the address does not say (`?feather=always|off`). */
+  chance: 0.18,
+  /** The first gap never holds one: the falcon has just started. */
+  minId: 2,
+} as const;
+
+/** `rare`: seeded and rare; `always`: every gap after the first; `off`: none. */
+export type FeatherMode = 'rare' | 'always' | 'off';
+
+/**
+ * Whether the obstacle with this id holds a feather. A hash of the seed and the id, so the obstacle random stream
+ * (and so every layout) is the same with and without feathers. Never twice in a row (except in `always`).
+ */
+export function hasFeather(seed: number, id: number, prevHadFeather: boolean, mode: FeatherMode): boolean {
+  if (mode === 'off' || id < FEATHER.minId) return false;
+  if (mode === 'always') return true;
+  return !prevHadFeather && hashUnit(seed, id) < FEATHER.chance;
+}
+
 export type ObstacleKind = 'tower' | 'palm';
 
 export interface Obstacle {
@@ -49,6 +73,10 @@ export interface Obstacle {
   passed: boolean;
   /** The date in the gap: centred on the obstacle, halfway between `gapTop` and `gapBottom`. */
   date: { y: number; caught: boolean };
+  /** The feather in the gap, in the same place as a date; null/absent when the gap has none. A gap never has both. */
+  feather?: { y: number; caught: boolean } | null;
+  /** True once a shield took a hit from this obstacle: it can't hit the falcon again. */
+  hitAbsorbed?: boolean;
 }
 
 export interface ObstacleField {
@@ -64,9 +92,14 @@ export interface ObstacleField {
   lastKind: ObstacleKind | undefined;
   /** How many obstacles of `lastKind` came in a row. */
   sameKindRun: number;
+  /** The seed, kept for the feather choice. */
+  seed: number;
+  featherMode: FeatherMode;
+  /** Whether the last obstacle added holds a feather. */
+  lastHadFeather: boolean;
 }
 
-export function createField(seed: number, groundY: number, startY: number): ObstacleField {
+export function createField(seed: number, groundY: number, startY: number, featherMode: FeatherMode = 'rare'): ObstacleField {
   return {
     obstacles: [],
     groundY,
@@ -76,6 +109,9 @@ export function createField(seed: number, groundY: number, startY: number): Obst
     lastGapTop: undefined,
     lastKind: undefined,
     sameKindRun: 0,
+    seed: seed | 0,
+    featherMode,
+    lastHadFeather: false,
   };
 }
 
@@ -126,6 +162,8 @@ function spawn(field: ObstacleField, x: number): ObstacleField {
   if (field.lastKind === kind && field.sameKindRun >= OBSTACLES.maxSameKind) {
     kind = kind === 'tower' ? 'palm' : 'tower';
   }
+  const withFeather = hasFeather(field.seed, field.nextId, field.lastHadFeather, field.featherMode);
+  const middle = gapTop + OBSTACLES.gapSize / 2;
   const obstacle: Obstacle = {
     id: field.nextId,
     kind,
@@ -134,7 +172,9 @@ function spawn(field: ObstacleField, x: number): ObstacleField {
     gapTop,
     gapBottom: gapTop + OBSTACLES.gapSize,
     passed: false,
-    date: { y: gapTop + OBSTACLES.gapSize / 2, caught: false },
+    // A feather gap holds the feather instead of the date (the date is marked caught, so it is never drawn or scored).
+    date: { y: middle, caught: withFeather },
+    ...(withFeather ? { feather: { y: middle, caught: false } } : {}),
   };
   return {
     ...field,
@@ -144,6 +184,7 @@ function spawn(field: ObstacleField, x: number): ObstacleField {
     lastGapTop: gapTop,
     lastKind: kind,
     sameKindRun: field.lastKind === kind ? field.sameKindRun + 1 : 1,
+    lastHadFeather: withFeather,
   };
 }
 
