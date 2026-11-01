@@ -17,6 +17,9 @@ export const STRINGS = {
     bronze: 'Bronze',
     silver: 'Silver',
     gold: 'Gold',
+    pause: 'Pause',
+    paused: 'Paused',
+    resumeHint: 'Tap to resume',
   },
   ar: {
     title: 'صقر السماء',
@@ -35,6 +38,9 @@ export const STRINGS = {
     bronze: 'برونزية',
     silver: 'فضية',
     gold: 'ذهبية',
+    pause: 'إيقاف مؤقت',
+    paused: 'متوقف مؤقتًا',
+    resumeHint: 'المس للمتابعة',
   },
 } as const;
 

@@ -42,12 +42,15 @@ export interface RunOptions {
   autopilot: boolean;
   /** Feathers: 'rare' (seeded), 'always' (every gap after the first) or 'off'. */
   feather: FeatherMode;
+  /** The flight opens paused (after one flap), for screenshots. */
+  pause: boolean;
 }
 
 /**
  * Reads the run settings from the page address: `?seed=7` gives the same obstacles every time, `?obstacles=off` flies
  * without them, `?autopilot=1` lets the game play itself,
- * `?feather=always|off` puts a feather in every gap or in none (rare and seeded otherwise).
+ * `?feather=always|off` puts a feather in every gap or in none (rare and seeded otherwise),
+ * `?pause=1` opens the flight paused (after one flap).
  */
 export function parseRunOptions(search: string): RunOptions {
   const params = new URLSearchParams(search);
@@ -55,7 +58,13 @@ export function parseRunOptions(search: string): RunOptions {
   const seed = seedText !== null && /^-?\d+$/.test(seedText.trim()) ? Number(seedText) : undefined;
   const featherText = params.get('feather');
   const feather: FeatherMode = featherText === 'always' || featherText === 'off' ? featherText : 'rare';
-  return { obstacles: params.get('obstacles') !== 'off', seed, autopilot: params.get('autopilot') === '1', feather };
+  return {
+    obstacles: params.get('obstacles') !== 'off',
+    seed,
+    autopilot: params.get('autopilot') === '1',
+    feather,
+    pause: params.get('pause') === '1',
+  };
 }
 
 export function createRun(

@@ -258,22 +258,26 @@ describe('speeding up', () => {
 
 describe('parseRunOptions', () => {
   it('reads the seed and the obstacles switch from the address', () => {
-    expect(parseRunOptions('')).toEqual({ obstacles: true, seed: undefined, autopilot: false, feather: 'rare' });
+    expect(parseRunOptions('')).toEqual({ obstacles: true, seed: undefined, autopilot: false, feather: 'rare', pause: false });
     expect(parseRunOptions('?seed=7&autopilot=1')).toEqual({
       obstacles: true,
       seed: 7,
       autopilot: true,
       feather: 'rare',
+      pause: false,
     });
     expect(parseRunOptions('?obstacles=off&seed=abc')).toEqual({
       obstacles: false,
       seed: undefined,
       autopilot: false,
       feather: 'rare',
+      pause: false,
     });
     expect(parseRunOptions('?feather=always').feather).toBe('always');
     expect(parseRunOptions('?feather=off').feather).toBe('off');
     expect(parseRunOptions('?feather=maybe').feather).toBe('rare');
+    expect(parseRunOptions('?pause=1').pause).toBe(true);
+    expect(parseRunOptions('?pause=0').pause).toBe(false);
   });
 });
 

@@ -57,8 +57,11 @@ export const SCORE_DEPTH = 50;
 /** Draw order of buttons on the screens (the mute button): above the score, under the game over screen (100). */
 export const UI_DEPTH = 60;
 
-/** The mute button: a square in a top corner. The slot of the same size next to it is kept for a pause button. */
+/** The mute button: a square in a top corner. The pause button (same size) sits in the slot next to it. */
 export const MUTE = { size: 56, margin: 16, y: 60 } as const;
+
+/** The pause button's gap to the mute button, and the pause overlay's depth (above buttons 60, under game over 100). */
+export const PAUSE_UI = { gap: 12, overlayDepth: 90 } as const;
 
 /** Text styles for the screens. */
 export const UI = {
