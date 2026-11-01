@@ -8,6 +8,9 @@ import { getLangStore } from '../i18n/langStore';
 import { applyPageLang } from '../i18n/pageLang';
 import { type Lang, directionOf, formatNumber, otherLang, t } from '../i18n/strings';
 import { getBestScoreStore } from '../score/bestScore';
+import { getBestMedalStore } from '../score/bestMedal';
+import type { Medal } from '../score/medals';
+import { drawMedal } from '../ui/drawMedal';
 
 const BUTTON = { x: GAME_WIDTH / 2, y: 610, width: 240, height: 84 };
 const SWITCH = { width: 160, height: 72, y: 60, margin: 20 };
@@ -28,6 +31,7 @@ export class StartScene extends Phaser.Scene {
   private started = false;
   private lang: Lang = 'en';
   private best = 0;
+  private bestMedal: Medal | null = null;
   private texts: Phaser.GameObjects.GameObject[] = [];
   private switchHit!: Phaser.GameObjects.Zone;
 
@@ -45,6 +49,7 @@ export class StartScene extends Phaser.Scene {
     this.view.update(this.falconState, this.time.now);
 
     this.best = getBestScoreStore().load();
+    this.bestMedal = getBestMedalStore().load();
     this.lang = getLangStore().get();
     this.buildTexts();
 
@@ -74,6 +79,7 @@ export class StartScene extends Phaser.Scene {
     this.registry.set('screen', 'start');
     this.registry.set('score', 0);
     this.registry.set('bestScore', this.best);
+    this.registry.set('bestMedal', this.bestMedal);
     this.registry.set('startUi', { ...BUTTON });
     // The falcon waits ("ready"): the snapshot lets tests check that it does not fall.
     const { y, vy, phase, flaps, time } = this.falconState;
@@ -109,7 +115,17 @@ export class StartScene extends Phaser.Scene {
     const play = t(lang, 'play');
     const other = t(lang, 'switchLanguage');
     text(GAME_WIDTH / 2, 190, title, 72, UI.title);
-    text(GAME_WIDTH / 2, 280, best, 38, UI.bestText);
+    text(GAME_WIDTH / 2, 262, best, 38, UI.bestText);
+    const medalName = this.bestMedal ? t(lang, this.bestMedal) : t(lang, 'noMedal');
+    const bestMedal = `${t(lang, 'bestMedal')}: ${medalName}`;
+    const medalLabel = text(GAME_WIDTH / 2, 312, bestMedal, 30, UI.bestText);
+    if (this.bestMedal) {
+      // The icon sits before the text: left in LTR, right in RTL.
+      const medalShape = this.add.graphics().setDepth(20);
+      this.texts.push(medalShape);
+      const gap = medalLabel.width / 2 + 28;
+      drawMedal(medalShape, GAME_WIDTH / 2 + (rtl ? gap : -gap), 305, this.bestMedal, 15);
+    }
 
     const left = BUTTON.x - BUTTON.width / 2;
     const top = BUTTON.y - BUTTON.height / 2;
@@ -132,7 +148,7 @@ export class StartScene extends Phaser.Scene {
     this.registry.set('lang', lang);
     this.registry.set('dir', directionOf(lang));
     this.registry.set('langUi', sw);
-    this.registry.set('startTexts', { title, bestScore: best, play, switchLanguage: other });
+    this.registry.set('startTexts', { title, bestScore: best, bestMedal, play, switchLanguage: other });
   }
 
   private toggleLang(): void {

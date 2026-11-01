@@ -18,6 +18,8 @@ import {
 import { randomSeed } from "../obstacles/random";
 import { getLangStore } from "../i18n/langStore";
 import { getBestScoreStore } from "../score/bestScore";
+import { getBestMedalStore } from "../score/bestMedal";
+import { medalOf } from "../score/medals";
 import { type ScoreView, createScoreView } from "../score/drawScore";
 import { scoreOf } from "../score/runScore";
 import { scrollSpeedOf, speedLevelOf } from "../score/speedUp";
@@ -120,6 +122,8 @@ export class FlightScene extends Phaser.Scene {
     this.registry.set("runOver", false);
     this.registry.set("runOverReason", null);
     this.registry.set("gameOver", null);
+    this.registry.set("medal", null);
+    this.registry.set("bestMedal", getBestMedalStore().load());
     this.publish();
     this.registry.set("ready", true);
   }
@@ -158,6 +162,10 @@ export class FlightScene extends Phaser.Scene {
     if (reason === "obstacle") this.view.fallFrom(this.run.falcon.y);
     const { best, isNewBest } = getBestScoreStore().record(scoreOf(this.run));
     const score = scoreOf(this.run);
+    const medal = medalOf(score);
+    const { best: bestMedal, isNewBest: isNewMedal } = getBestMedalStore().record(medal);
+    this.registry.set("medal", medal);
+    this.registry.set("bestMedal", bestMedal);
     this.registry.set("runOver", true);
     this.registry.set("runOverReason", reason);
     this.events.emit(FlightScene.RUN_OVER, reason);
@@ -171,6 +179,9 @@ export class FlightScene extends Phaser.Scene {
           score,
           best,
           isNewBest,
+          medal,
+          bestMedal,
+          isNewMedal,
           lang: getLangStore().get(),
           onPlayAgain: () => this.scene.restart(),
         }),
