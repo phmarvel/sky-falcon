@@ -37,6 +37,13 @@ export const COLORS = {
   overlay: 0x1d1410,
   panel: 0xfff4d6,
   panelEdge: 0x3a2414,
+  medalRibbon: 0xc0392b,
+  medalRibbonDark: 0x8e2a20,
+  medal: {
+    bronze: { face: 0xcd7f32, edge: 0x8a4f1a, star: 0xf3c89b },
+    silver: { face: 0xc9d1d9, edge: 0x7b8794, star: 0xffffff },
+    gold: { face: 0xffc629, edge: 0xb8860b, star: 0xfff3b0 },
+  },
 } as const;
 
 /** Draw order of the score: above the obstacles (0) and the falcon (10), under the game over screen (100). */
