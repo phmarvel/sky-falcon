@@ -84,7 +84,7 @@ jobs:
           #!/usr/bin/env bash
           # ReleaseHub agent runner: reads the run's context, runs the coding agent, opens or updates the pull request, reports back.
           set -euo pipefail
-          RH_SCRIPT_VERSION="913fb799f081"
+          RH_SCRIPT_VERSION="fb9c195e0a82"
           API="${RH_API%/}"
           EVENTS="$API/api/v1/ai/runner/runs/$RH_RUN/events"
           WORK="${RUNNER_TEMP:-${AGENT_TEMPDIRECTORY:-/tmp}}/releasehub"
@@ -93,6 +93,8 @@ jobs:
           TOOLS="$WORK/tools"
           USAGE='null'
           FAILING=''
+          # The last commit on the run's branch is the unfinished work of an earlier try (plan 1.43): this one goes on from it.
+          WIP=""
           # On GitHub, git asks this script's environment for the token when it fetches or pushes: the checkout doesn't keep it
           # (persist-credentials: false), nothing secret is written into a repository's config, and the agent's tools run without it.
           # shellcheck disable=SC2016 # expanded by git's shell when it asks, not here
@@ -109,6 +111,9 @@ jobs:
           size_of() { wc -c < "$1" | tr -d ' '; }
           sha256_of() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$@"; else shasum -a 256 "$@"; fi; }
           new_id() { cat /proc/sys/kernel/random/uuid 2>/dev/null || uuidgen | tr 'A-Z' 'a-z'; }
+          # What the runner itself starts from settings the agent wrote (the app, its build) runs without the runner's secret and the code
+          # host's tokens, as the agent does.
+          NO_SECRETS=(env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN)
           # Runs a command for at most $1 seconds.
           within() {
             local seconds=$1
@@ -130,7 +135,7 @@ jobs:
             body=$(jq -c --arg id "$(new_id)" --argjson d "$RH_DISPATCH" --arg rid "$RUN_ID" --arg url "$RUN_URL" \
               --rawfile notes "$WORK/notes.out" \
               '. + {eventId: $id, dispatch: $d, externalRunId: $rid, externalRunUrl: $url}
-               | if (.type == "plan" or .type == "code" or .type == "answer") and $notes != "" then . + {notes: $notes} else . end' <<<"$1")
+               | if (.type == "plan" or .type == "code" or .type == "answer" or .type == "playtest") and $notes != "" then . + {notes: $notes} else . end' <<<"$1")
             read -r ts sig <<<"$(sign "$body")"
             # From a file: Linux takes at most 128 KB in one argument, and a change's report carries its diff (up to 150 KB).
             printf '%s' "$body" > "$WORK/event.json"
@@ -193,6 +198,19 @@ jobs:
           }
 
           # Pushes the agent's branch; a refusal names the missing permission instead of a line number.
+          # The provider stopped the agent in the middle of changing the code (out of credit, a usage limit, an error; plan 1.43): its work
+          # so far goes to the run's branch as a WIP commit, so trying again goes on from it instead of starting over. Never fails the run.
+          keep_wip() {
+            [ "$1" = "edit" ] || return 0
+            [ ! -f "$(git rev-parse --git-dir)/MERGE_HEAD" ] || return 0
+            [ -n "$(git status --porcelain 2>/dev/null)" ] || return 0
+            git add -A >/dev/null 2>&1 && git commit -q -m "WIP: $KEY, stopped before finishing" -m "Made by a ReleaseHub agent run; its next try goes on from here." >/dev/null 2>&1 || return 0
+            if git push -q origin "$RH_BRANCH" >/dev/null 2>&1; then
+              log "Kept the work so far on $RH_BRANCH (a WIP commit): trying again goes on from it." warning
+            fi
+            return 0
+          }
+
           push_branch() {
             local out
             if ! out=$(git push -q origin "$RH_BRANCH" 2>&1); then
@@ -274,10 +292,14 @@ jobs:
           NOTES_FILE="CLAUDE.local.md"
           # What only a person can do, as the agent writes it for ReleaseHub (kept out of git like the notes).
           NEEDS_FILE=".releasehub-context/needs.json"
+          # The pull request's description, as the agent writes it for its reviewers (plan 1.45).
+          PR_FILE=".releasehub-context/pull-request.md"
+          # What a play-test found, as the agent writes it (plan 1.48).
+          PLAYTEST_FILE=".releasehub-context/playtest.json"
           prepare_notes() {
             mkdir -p .releasehub-context
             grep -qx ".releasehub-context/" .git/info/exclude 2>/dev/null || echo ".releasehub-context/" >> .git/info/exclude
-            rm -f "$NEEDS_FILE"
+            rm -f "$NEEDS_FILE" "$PR_FILE"
             if git ls-files --error-unmatch CLAUDE.local.md >/dev/null 2>&1; then
               NOTES_FILE=".releasehub-context/notes.md"
             else
@@ -337,6 +359,8 @@ jobs:
           # Saves the agent's conversation for the next stage (gzipped, signed over its SHA-256).
           save_session() {
             [ "$RH_PROVIDER" = "claude-code" ] || return 0
+            # A play-test's conversation isn't kept: the next round goes on from the conversation of the agent that made the change.
+            [ "$RH_STAGE" != "playtest" ] || return 0
             local id file folder sha ts sig
             id=$(jq -r '.session_id // empty' "$WORK/out.json" 2>/dev/null)
             case "$id" in ""|*[!A-Za-z0-9-]*) return 0 ;; esac
@@ -527,6 +551,40 @@ jobs:
               -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$WORK/kit.out.tgz" && log "Kept the preview kit for the next run." || true
           }
 
+          # Publishes this version of the pull request to try on a phone (plan 1.48): the app's static build, as the preview settings say
+          # (site.build: the command, with paths relative to the page; site.out: the folder it writes). ReleaseHub serves it at its own
+          # address and says so on the run. Never fails the stage, and leaves nothing behind in the checkout.
+          publish_site() {
+            [ "$(jq -r '.browser.publish // false' "$WORK/context.json")" = "true" ] && [ -f "$KIT_DIR/capture.json" ] || return 0
+            local build out sha ts sig code
+            build=$(jq -r '.site.build // empty' "$KIT_DIR/capture.json" 2>/dev/null || true)
+            out=$(jq -r '.site.out // empty' "$KIT_DIR/capture.json" 2>/dev/null || true)
+            [ -n "$build" ] && [ -n "$out" ] || return 0
+            case "$out" in /*|*..*) log "The preview settings' site.out has to be a folder in the repository, not $out." warning; return 0 ;; esac
+            log "Building this version to publish it to try on a phone."
+            if ! within 900 "${NO_SECRETS[@]}" CI=true bash -c "$build" > "$WORK/site-build.log" 2>&1; then
+              log "Couldn't build the app to publish it: $(said "$WORK/site-build.log" | tail -c 240)" warning
+            elif [ ! -f "$out/index.html" ]; then
+              log "The build wrote no $out/index.html, so there is nothing to publish." warning
+            else
+              tar -czf "$WORK/site.tgz" -C "$out" .
+              if [ "$(size_of "$WORK/site.tgz")" -gt 26214400 ]; then
+                log "The build is over 25 MB packed, so it isn't published." warning
+              else
+                sha=$(sha256_of "$WORK/site.tgz" | cut -d' ' -f1)
+                read -r ts sig <<<"$(sign "$RH_RUN.$RH_DISPATCH.site.$sha")"
+                code=$(curl -sS --retry 2 -o "$WORK/site.json" -w '%{http_code}' -X POST \
+                  "$API/api/v1/ai/runner/runs/$RH_RUN/site?dispatch=$RH_DISPATCH&sha=$(git rev-parse HEAD)" \
+                  -H 'Content-Type: application/gzip' -H "tenant: $RH_TENANT" -H "X-ReleaseHub-Timestamp: $ts" -H "X-ReleaseHub-Signature: $sig" \
+                  -H "X-ReleaseHub-Content-Sha256: $sha" --data-binary "@$WORK/site.tgz" || true)
+                [ "${code:0:1}" = "2" ] || log "Couldn't publish the build: $(jq -r '.problem // .status // empty' "$WORK/site.json" 2>/dev/null || true)" warning
+              fi
+            fi
+            git checkout -q -- . 2>/dev/null || true
+            git clean -fdq -- "$out" 2>/dev/null || true
+            return 0
+          }
+
           # Sends the screenshots the agent saved to the run's page (signed over the name and the file's SHA-256).
           upload_screenshots() {
             [ -d "$SHOTS_DIR" ] || return 0
@@ -545,6 +603,7 @@ jobs:
             done < <(find "$SHOTS_DIR" -maxdepth 1 -type f \( -iname '*.png' -o -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.webp' \) | sort | head -40)
             rm -rf "$SHOTS_DIR"
             [ "$sent" -eq 0 ] || log "Added $sent screenshot(s) of the app to the run."
+            SHOTS_SENT=$((${SHOTS_SENT:-0} + sent))
             return 0
           }
 
@@ -556,15 +615,17 @@ jobs:
           #!/usr/bin/env bash
           # rh-verify: runs the repository's own checks in one call and prints a short summary, so the agent doesn't spend a model
           # call (and a re-read of its conversation) on each tool. Full output goes to log files; failures show their last lines.
-          # Usage: rh-verify [--build] [--no-tests] [DIR]   (--build adds the production build; DIR for a project in a subfolder)
+          # Usage: rh-verify [--build] [--no-tests] [--e2e] [DIR]   (--build adds the production build; --e2e the browser tests, as CI runs
+          # them and again on one CPU core; DIR for a project in a subfolder)
           set -uo pipefail
 
-          build="" tests=1 dir="."
+          build="" tests=1 e2e="" dir="."
           for arg in "$@"; do
             case "$arg" in
               --build) build=1 ;;
               --no-tests) tests="" ;;
-              -h|--help) sed -n '2,4p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+              --e2e) e2e=1 ;;
+              -h|--help) sed -n '2,5p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
               *) dir="$arg" ;;
             esac
           done
@@ -633,6 +694,27 @@ jobs:
               step tests "$pm test"
             fi
             if [ -n "$build" ] && [ -n "$(script_of build)" ]; then step build "$pm run build"; fi
+            # The browser tests (plan 1.45), as CI runs them, then again on one CPU core: a test that counts frames or waits a fixed time
+            # passes on a free machine and fails on a busy one, as on a CI machine running the app and the browser together.
+            if [ -n "$e2e" ]; then
+              e2e_cmd=""
+              for name in test:e2e e2e test:browser; do
+                if [ -n "$(script_of "$name")" ]; then e2e_cmd="$pm run $name"; break; fi
+              done
+              if [ -z "$e2e_cmd" ] && ls playwright.config.* >/dev/null 2>&1 && [ -x node_modules/.bin/playwright ]; then e2e_cmd="node_modules/.bin/playwright test"; fi
+              if [ -z "$e2e_cmd" ]; then
+                echo "SKIP  e2e (no test:e2e, e2e or test:browser script, and no Playwright config)"
+              else
+                # The browser the tests need, once (quietly: a machine without it shows the failure in the step).
+                [ ! -x node_modules/.bin/playwright ] || limited node_modules/.bin/playwright install chromium > "$logs/e2e-install.log" 2>&1 || true
+                step e2e "$e2e_cmd"
+                if command -v taskset >/dev/null 2>&1; then
+                  step e2e-one-core "taskset -c 0 $e2e_cmd"
+                else
+                  echo "SKIP  e2e-one-core (this machine has no taskset to keep the tests on one core)"
+                fi
+              fi
+            fi
           fi
 
           if [ -n "$(find . -maxdepth 3 \( -name '*.sln' -o -name '*.slnx' -o -name '*.csproj' \) -not -path '*/node_modules/*' -print -quit 2>/dev/null)" ]; then
@@ -2081,7 +2163,7 @@ jobs:
             [ -n "$BROWSER" ] && [ -f "$KIT_DIR/capture.json" ] || return 0
             # Settings for the phone app only: phone_check opens it.
             [ "$(jq -r 'has("phone") and (has("baseUrl") | not)' "$KIT_DIR/capture.json" 2>/dev/null)" != "true" ] || return 0
-            if within 300 "$TOOLS/rh-capture" --platform web --check > "$WORK/app.txt" 2>&1; then
+            if within 300 "${NO_SECRETS[@]}" "$TOOLS/rh-capture" --platform web --check > "$WORK/app.txt" 2>&1; then
               log "Started the app with the saved preview settings$(grep -q '^Sign-in: signed in' "$WORK/app.txt" && printf ' and signed in with the test account')."
             else
               log "The saved preview settings didn't work, so the agent starts by fixing them: $(said "$WORK/app.txt" | tail -c 240)" warning
@@ -2096,7 +2178,7 @@ jobs:
             [ -n "$PHONE" ] && [ -f "$KIT_DIR/capture.json" ] || return 0
             [ "$(jq -r 'has("phone")' "$KIT_DIR/capture.json" 2>/dev/null)" = "true" ] || return 0
             log "Building the phone app and opening it with the saved settings (a first build takes a few minutes)."
-            if within 2400 "$TOOLS/rh-capture" --platform phone --check > "$WORK/phone-app.txt" 2>&1; then
+            if within 2400 "${NO_SECRETS[@]}" "$TOOLS/rh-capture" --platform phone --check > "$WORK/phone-app.txt" 2>&1; then
               log "Built the phone app and opened it on $(grep -m1 '^Phone: ' "$WORK/phone-app.txt" | sed 's/^Phone: //; s/, with .*//')$(grep -q '^Sign-in on .*: signed in' "$WORK/phone-app.txt" && printf ', signed in with the test account')."
             else
               log "The saved phone settings didn't work, so the agent starts by fixing them: $(said "$WORK/phone-app.txt" | tail -c 240)" warning
@@ -2261,13 +2343,45 @@ jobs:
             save_kit
           }
 
+          # The pull request conflicts with the branch it merges into (plan 1.41): bring that branch in first; the agent resolves what git
+          # can't. The files left in conflict go to the prompt.
+          merge_base() {
+            : > "$WORK/conflicts.txt"
+            [ "$(jq -r '.run.mergeBase // false' "$WORK/context.json")" = "true" ] || return 0
+            git fetch -q origin "$TARGET" || fail "Couldn't fetch $TARGET to bring it in."
+            if git merge --no-edit -q "origin/$TARGET" >/dev/null 2>&1; then
+              log "Brought $TARGET in: it merged without conflicts."
+              return 0
+            fi
+            git diff --name-only --diff-filter=U > "$WORK/conflicts.txt"
+            if [ ! -s "$WORK/conflicts.txt" ]; then
+              git merge --abort >/dev/null 2>&1 || true
+              fail "Couldn't bring $TARGET in: git refused the merge."
+            fi
+            log "Brought $TARGET in: $(wc -l < "$WORK/conflicts.txt" | tr -d ' ') file(s) conflict, for the agent to resolve."
+          }
+
+          # A merge the agent finished: committed only once no conflict marker is left in the files that conflicted.
+          finish_merge() {
+            [ -f "$(git rev-parse --git-dir)/MERGE_HEAD" ] || return 0
+            local f left=""
+            while IFS= read -r f; do
+              [ -n "$f" ] && [ -f "$f" ] && grep -qE '^(<<<<<<<|>>>>>>>)( |$)' "$f" && left="$left $f"
+            done < "$WORK/conflicts.txt"
+            [ -z "$left" ] || fail "The agent left conflict markers in:$left."
+            git add -A
+            git commit -q -m "$KEY: bring $TARGET in" -m "Made by a ReleaseHub agent run."
+          }
+
           prompt() {
             local creds=""
+            [ -f "$WORK/conflicts.txt" ] || : > "$WORK/conflicts.txt"
             [ ! -f "$WORK/preview.env" ] || creds=1
             jq -r --arg stage "$RH_STAGE" --arg notes "$NOTES_FILE" --rawfile files "$WORK/files.txt" --rawfile app "$WORK/app.txt" --rawfile extras "$WORK/extras.txt" \
               --arg browser "$BROWSER" --arg shots "$PWD/$SHOTS_DIR" --arg kit "$PWD/$KIT_DIR" --arg creds "$creds" \
               --arg phone "$PHONE" --arg phoneon "$PHONE_ON" --arg phonetool "$PHONE_TOOL" --rawfile phoneapp "$WORK/phone-app.txt" \
-              --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" --arg needs "$NEEDS_FILE" --arg github "${GITHUB_RUN_ID:+1}" '
+              --arg game "$GAME" --arg games "$(cat "$WORK/games.txt" 2>/dev/null || true)" --arg needs "$NEEDS_FILE" --arg github "${GITHUB_RUN_ID:+1}" \
+              --arg target "$TARGET" --rawfile conflicted "$WORK/conflicts.txt" --arg wip "$WIP" --arg pr "$PR_FILE" --arg playtest "$PLAYTEST_FILE" '
               "You are a coding agent working in the repository " + .repository.name + " for ReleaseHub run " + .run.key + ".\n\n" +
               (if $stage == "answer"
                 then (if .discussing then "You are discussing a change with the person who asked for it (below). You are on its branch: read the actual code. " +
@@ -2277,6 +2391,9 @@ jobs:
               elif $stage == "planning"
                 then "Write an implementation plan in Markdown: the files you will change, the steps and the tests. Cover the whole scope of the task — " +
                   "if it asks for a redesign or a structural change, plan that, not small cosmetic edits. Do not change any files in this step.\n\n"
+              elif $stage == "playtest"
+                then "Play-test the change on this branch (its pull request is open) the way a person trying it would: check each acceptance criterion in the running app, " +
+                  "and change none of its files. You are checking the work, not doing it: report what you see, including what fails.\n\n"
                 else "Implement the task" + (if .plan then ", following the approved plan" else "" end) +
                   (if .feedback then " and addressing the latest feedback" else "" end) +
                   ". Make every change the plan and the feedback call for, including structural ones (new components, layout and flow changes); " +
@@ -2296,7 +2413,9 @@ jobs:
                 (if .workItem.fields then "\nOther fields:\n" + ([.workItem.fields | to_entries[] | "- " + .key + ": " + .value] | join("\n")) + "\n" else "" end) +
                 (if .workItem.parent then "\nPart of " + .workItem.parent.key + " (" + .workItem.parent.type + "): " + .workItem.parent.title +
                   (if (.workItem.parent.description // "") != "" then "\n" + .workItem.parent.description else "" end) +
-                  (if (.workItem.parent.comments // []) | length > 0 then "\nIts discussion (oldest first):\n" + ([.workItem.parent.comments[] | "- " + .author + " (" + .at + "): " + .body] | join("\n")) else "" end) + "\n" else "" end)
+                  (if (.workItem.parent.comments // []) | length > 0 then "\nIts discussion (oldest first):\n" + ([.workItem.parent.comments[] | "- " + .author + " (" + .at + "): " + .body] | join("\n")) else "" end) +
+                  (if (.workItem.parent.stories // []) | length > 0 then "\nIts other stories, each its own run: leave their parts to them, and build only this one.\n" +
+                    ([.workItem.parent.stories[] | "- " + .key + ": " + .title + " (" + .status + (if .run then "; " + .run else "" end) + ")"] | join("\n")) else "" end) + "\n" else "" end)
               else "" end) +
               (if .comments then "\n## Discussion on the work item (oldest first)\n" + ([.comments[] | "- " + .author + " (" + .at + "): " + .body] | join("\n")) + "\n" else "" end) +
               (if $files != "" then "\n## Files attached to the work item\nThese are part of the scope: read every one, and look at the images (screenshots, mockups, designs) with your Read tool before you start. Do not commit them.\n" + $files else "" end) +
@@ -2311,6 +2430,17 @@ jobs:
                   (if .plan then "\n  Its plan began:\n" + (.plan | split("\n") | map("    " + .) | join("\n")) else "" end) +
                   (if .answer then "\n  Answer given: " + .answer else "" end) +
                   (if .pullRequest then "\n  Pull request: " + .pullRequest + " (" + (.changedFiles | tostring) + " files)" else "" end)] | join("\n")) + "\n" else "" end) +
+              (if (.others // []) | length > 0 then "\n## Other work in this repository right now\nOther runs are changing this repository at the same time, each on its own branch, and will be merged too. " +
+                "Don'"'"'t build what they build: reuse the file names, modules and storage keys they plan, and say in your plan which of your files they change too.\n" +
+                ([.others[] | "- " + .key + (if .workItem then " (" + .workItem + ")" else "" end) + ", " + .status + ": " + .title +
+                  (if (.files // []) | length > 0 then "\n  Files: " + (.files | join(", ")) else "" end) +
+                  (if (.plan // "") != "" then "\n  Its plan began:\n" + (.plan | split("\n") | map("    " + .) | join("\n")) else "" end)] | join("\n")) + "\n" else "" end) +
+              (if $wip != "" and $stage != "planning" then "\n## Work an earlier try left\nAn earlier try of this stage stopped before it finished (its AI provider stopped it). " +
+                "Its work so far is the last commit on this branch (\"WIP: ...\"): check what it already did and go on from it rather than starting over.\n" else "" end) +
+              (if .run.mergeBase and $stage != "planning" then "\n## Bringing " + $target + " in\n" + $target + " moved on since this branch was made. It was merged into this branch before you started" +
+                (($conflicted | split("\n") | map(select(length > 0)) | join(", ")) as $conflicts |
+                 if $conflicts != "" then ", and these files conflict: " + $conflicts + ". Resolve every conflict (the <<<<<<< ======= >>>>>>> markers) keeping what both sides meant: keep the other side'"'"'s changes, don'"'"'t drop them" else " without conflicts" end) +
+                ". Then run all the checks again: code that merged cleanly can still break.\n" else "" end) +
               (if .personFeedback then "\n## What the person who started this run asked for on other runs (newest first)\nTheir preferences: apply what fits this task.\n" +
                 ([.personFeedback[] | "- " + .feedback + " (" + .run + ", " + .at + ")"] | join("\n")) + "\n" else "" end) +
               (if (.personNotes // "") != "" then "\n## How the person who started this run likes the work done\n" + .personNotes + "\n" else "" end) +
@@ -2335,8 +2465,13 @@ jobs:
                 (if $stage == "planning" then "- Before you plan, capture the pages the task touches: rh-capture --phase before --pages \"NAME=/route,NAME2=/route2\" (NAME: a short name per page). " +
                     "Open the screenshots you need and base the plan on what you saw.\n"
                   elif $stage == "answer" then "- Capture the pages when it helps you answer.\n"
+                  elif $stage == "playtest" then "- Play-test with the playwright browser tools: open the app, do what each criterion describes (click, type, wait, play), resize the browser to a phone (390x844) and a desktop (1440x900), " +
+                    "switch the language as the settings do, and save each screenshot with browser_take_screenshot and a file name (see Play-test below). rh-capture --check starts the app with the saved settings.\n"
                   else "- After your change, capture the same pages with the same names: rh-capture --phase after --pages \"NAME=/route,NAME2=/route2\". Fix what the report and the screenshots show " +
-                    "(layout, overflow, spacing, alignment, contrast, right to left) and capture again until it is right. To review many pages, the checker subagent can look and report back as text.\n" end) +
+                    "(layout, overflow, spacing, alignment, contrast, right to left) and capture again until it is right. To review many pages, the checker subagent can look and report back as text.\n" +
+                    (if .browser.publish then "- ReleaseHub publishes each version of the pull request for people to try on a phone. When the app builds to static files (a game, a single-page app) and the settings " +
+                      "have no \"site\" yet, add \"site\": {\"build\": the command that installs and builds it with paths relative to the page (for Vite: npm ci --no-audit --no-fund && npx vite build --base ./), " +
+                      "\"out\": the folder it writes (dist)}. The runner builds and publishes it after you finish.\n" else "" end) end) +
                 "- A game drawn on a canvas is checked as a game: rh-capture waits for it to draw and says when its screen is one colour. Reach its screens by address (/?scene=shop) or a hook the game reads in development builds.\n" +
                 "- Use the playwright browser tools only to interact with a page (click through a flow, inspect an element); rh-capture covers looking.\n" +
                 "- Keep a short page map in your memory file (route, screen, main component), and stop any process you started before you finish.\n" +
@@ -2356,6 +2491,8 @@ jobs:
                 (if $stage == "planning" then "- Before you plan, capture the screens the task touches: rh-capture --platform phone --phase before --pages \"NAME=/route,NAME2=flows/NAME2.yaml\" (NAME: a short name per screen). " +
                     "Open the screenshots you need and base the plan on what you saw.\n"
                   elif $stage == "answer" then "- Capture the screens when it helps you answer.\n"
+                  elif $stage == "playtest" then "- Play-test on the phone: build and open the app with rh-capture --platform phone --check, then go through each criterion with the mobile tools (tap, type, read the screen), " +
+                    "and capture the screens that show it with rh-capture --platform phone --phase playtest --pages \"pt-1=/route\" (see Play-test below).\n"
                   else "- After your change, capture the same screens with the same names: rh-capture --platform phone --phase after --pages \"NAME=/route,NAME2=flows/NAME2.yaml\". Fix what the report and the screenshots show " +
                     "(layout, spacing, alignment, contrast, cut-off text, right to left) and capture again until it is right.\n" end) +
                 (if $phonetool == "1" then "- Use the mobile tools only to interact with the app (tap through a flow, type, read what the screen holds); rh-capture covers looking.\n" else "" end) +
@@ -2371,9 +2508,21 @@ jobs:
                 "write the settings and check them with rh-capture --platform game --check. The build runs on a fresh machine, so it gets the engine first when the machine has none (Godot: the version project.godot names); Unity needs its licence on the machine.\n" +
                 (if $stage == "planning" then "- Before you plan, capture the screens the task touches: rh-capture --platform game --phase before --pages \"NAME=scene,NAME2=scene2\". Open the pictures you need and base the plan on what you saw.\n"
                   elif $stage == "answer" then "- Capture the screens when it helps you answer.\n"
+                  elif $stage == "playtest" then "- Play-test the game: capture the screens each criterion is about with rh-capture --platform game --phase playtest --pages \"pt-1=scene\", and run the game where the machine can to try what the pictures can'"'"'t show (see Play-test below).\n"
                   else "- After your change, capture the same screens with the same names: rh-capture --platform game --phase after --pages \"NAME=scene,NAME2=scene2\". Fix what the pictures show and capture again until it is right.\n" end) +
                 "- Keep a short screen map in your memory file (screen name, scene, what it shows).\n"
               else "" end) +
+              (if $stage == "playtest" then "\n## Play-test\nCheck each acceptance criterion of the work item above in the running app; when there is no list, take the criteria from the task and the plan " +
+                "(what someone trying the change would check). The pull request: " + (.playTest.pullRequest // "this branch") + "; the files it changed: " + ((.playTest.changedFiles // []) | join(", ")) + ".\n" +
+                "- Check each one on a phone (390x844) and on a desktop (1440x900), and in each language the app has. A game is played: reach the moment the criterion is about by playing, " +
+                "or through a hook or an address the game reads in development builds, and look at the screen.\n" +
+                "- A criterion passes only when you saw it hold at each size and in each language. When it does not, say in a sentence what you saw instead. When you cannot check it " +
+                "(it needs a real payment, another device, data you cannot make), mark it unchecked and say why.\n" +
+                "- Save a screenshot as proof of each criterion at each size and language, named pt-NUMBER-SIZE-LANGUAGE.png (for example pt-2-phone-ar.png), at most 16 in all.\n" +
+                "- Change no files of the app. Start it with its saved settings; fix only the preview settings when they are wrong.\n" +
+                "- Before you finish, write the results to " + $playtest + " as JSON: {\"summary\": two lines on what you checked and what you found, \"criteria\": [{\"criterion\": the criterion as written, " +
+                "\"result\": \"passed\", \"failed\" or \"unchecked\", \"how\": what you did, at which sizes and in which languages, \"note\": what went wrong or why you could not check it " +
+                "(empty when it passed), \"screenshots\": [its screenshots'"'"' file names]}]}. Write the summary, how and note in the language the task is written in.\n" else "" end) +
               "\n## What only a person can do\nSome things only a person can do: a setting on the code host, an account or a key for another service, a secret, " +
                 "a domain, a payment. Never stop for them and never invent their values: do the rest of the task, then write each one to " + $needs +
                 " as a JSON array of {\"title\": what to do, in a few words; \"why\": what needs it; \"steps\": numbered steps in Markdown that a person can follow " +
@@ -2391,12 +2540,19 @@ jobs:
                 (if .rules.checksBuild then "- Check your work with rh-verify: lint, type check and tests in one call, with a short summary. Do not run the production build: " +
                     "the checks of the pull request build it, and a failed build comes back to you as a revision.\n"
                   else "- Check your work with rh-verify: lint, type check and tests in one call, with a short summary. Run rh-verify --build once at the end for the production build.\n" end) +
+                "- When the repository has browser tests, run rh-verify --e2e once before you finish: it runs them as its CI does, then again on one CPU core, " +
+                  "where a test that counts frames or waits a fixed time fails as it does on a busy CI machine. Make such tests wait for what they expect " +
+                  "(an element, a state, time in the app or game), not for a number of milliseconds.\n" +
                 "- For a change across many files, split it: start up to three worker subagents in one message, each with its own files and a short brief " +
                 "(its part of the plan, the files it owns, the decisions made). They work at the same time, each with a small conversation of its own. Then check the whole change yourself.\n"
               else "" end) +
               "\n## Rules\n" + ([.rules.safety[] | "- " + .] | join("\n")) +
               (if (.rules.protectedPaths | length) > 0 then "\n- Protected paths: " + ([.rules.protectedPaths[].pattern] | join(", ")) else "" end) +
               "\n- Follow the repository conventions in " + (.rules.conventionFiles | join(", ")) + " where they exist." +
+              (if $stage == "coding" or $stage == "revision" then "\n- Before you finish, write the pull request'"'"'s description to " + $pr + " in Markdown, for the people who review it, " +
+                  "in the language the task is written in: ## What changed (what people will see or what behaves differently, then the main files), ## Why (the task, in a line), " +
+                  "## How it was checked (the checks you ran and what they showed, the screens you looked at and at which sizes), and anything a reviewer should look at closely. " +
+                  "Under 60 lines; describe the whole change on the branch, not only this round." else "" end) +
               "\n- Before you finish, update " + $notes + " with what a future run on this repository should know: its structure, where things live, " +
               "conventions, commands, pitfalls. Keep it short (under 150 lines), current and general — not details of this task.\n"
             ' "$WORK/context.json"
@@ -2471,7 +2627,7 @@ jobs:
                 local long="$PHONE$GAME"
                 env -u RH_SECRET -u GH_TOKEN -u SYSTEM_ACCESSTOKEN MAX_MCP_OUTPUT_TOKENS=12000 ${long:+BASH_MAX_TIMEOUT_MS=1800000} \
                   claude -p ${resume[@]+"${resume[@]}"} "${args[@]}" < "$1" > "$WORK/out.json" 2> "$WORK/err.txt" || rc=$?
-                if [ "$rc" -ne 0 ] && [ -n "$RESUME_ID" ] && grep -Eqi 'no conversation found|session' "$WORK/err.txt" "$WORK/out.json" 2>/dev/null; then
+                if [ "$rc" -ne 0 ] && [ -n "$RESUME_ID" ] && grep -qi 'no conversation found' "$WORK/err.txt" "$WORK/out.json" 2>/dev/null; then
                   # The earlier conversation couldn't be continued here: start fresh with the full prompt.
                   log "Couldn't continue the earlier conversation; starting a new one." warning
                   rc=0
@@ -2490,6 +2646,7 @@ jobs:
                 [ -n "$USAGE" ] || USAGE='null'
                 if [ "$rc" -ne 0 ] || [ "$(jq -r '.is_error // false' "$WORK/out.json" 2>/dev/null || echo true)" = "true" ]; then
                   jq -r '.result // empty' "$WORK/out.json" > "$WORK/said.txt" 2>/dev/null || cp "$WORK/out.json" "$WORK/said.txt"
+                  keep_wip "$2"
                   if said "$WORK/said.txt" "$WORK/err.txt" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/said.txt" "$WORK/err.txt")"; fi
                   fail "Claude Code stopped with an error: $(said "$WORK/said.txt" "$WORK/err.txt" | tail -c 300)"
                 fi
@@ -2505,6 +2662,7 @@ jobs:
                 if [ -n "${MODEL:-}" ]; then cargs+=(--model "$MODEL"); fi
                 codex "${cargs[@]}" "$(cat "$1")" > "$WORK/out.jsonl" 2> "$WORK/err.txt" || rc=$?
                 if [ "$rc" -ne 0 ]; then
+                  keep_wip "$2"
                   if said "$WORK/err.txt" "$WORK/out.jsonl" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/err.txt")"; fi
                   fail "Codex stopped with an error: $(said "$WORK/err.txt" | tail -c 300)"
                 fi
@@ -2518,6 +2676,7 @@ jobs:
                 local rc=0
                 copilot -p "$(cat "$1")" --allow-all-tools > "$WORK/result.txt" 2> "$WORK/err.txt" || rc=$?
                 if [ "$rc" -ne 0 ]; then
+                  keep_wip "$2"
                   if said "$WORK/err.txt" "$WORK/result.txt" | grep -Ei "$LIMIT_RE" >/dev/null; then limited "$(said "$WORK/err.txt" "$WORK/result.txt")"; fi
                   fail "Copilot stopped with an error: $(said "$WORK/err.txt" | tail -c 300)"
                 fi
@@ -2529,14 +2688,38 @@ jobs:
             esac
           }
 
+          # The pull request's description (plan 1.45): what the agent wrote for its reviewers (what changed, why, how it was checked), or
+          # else the start of its last message; then the run, where its screenshots are. Prints the file it's in.
+          pr_body() {
+            local out="$WORK/pr-body.md"
+            : > "$out"
+            # Cut by characters, not bytes, so Arabic text isn't cut in the middle of a letter (-j: no line break added).
+            if [ -s "$PR_FILE" ]; then
+              jq -Rjs '.[0:12000] | rtrimstr("\n")' "$PR_FILE" > "$out"
+            elif [ "$RH_STAGE" != "revert" ] && [ -s "$WORK/result.txt" ]; then
+              { printf '## What the agent did\n\n'; jq -Rjs '.[0:3000] | rtrimstr("\n")' "$WORK/result.txt"; } > "$out"
+            fi
+            {
+              [ ! -s "$out" ] || printf '\n\n---\n'
+              printf 'Opened by ReleaseHub agent run %s.' "$KEY"
+              [ "${SHOTS_SENT:-0}" -eq 0 ] || printf ' Its %s screenshot(s) of the app are on the run.' "$SHOTS_SENT"
+              [ -z "$RUN_LINK" ] || printf '\n\n%s' "$RUN_LINK"
+              printf '\n'
+            } >> "$out"
+            printf '%s' "$out"
+          }
+
           open_pr() {
             local num url files body
-            body=$(printf 'Opened by ReleaseHub agent run %s.' "$KEY")
-            [ -z "$RUN_LINK" ] || body=$(printf '%s\n\n%s' "$body" "$RUN_LINK")
+            body=$(pr_body)
             if [ -n "${GITHUB_RUN_ID:-}" ]; then
               num=$(gh pr list --head "$RH_BRANCH" --state open --json number --jq '.[0].number // empty')
+              if [ -n "$num" ] && [ -s "$PR_FILE" ]; then
+                # A revision describes the whole change again.
+                gh pr edit "$num" --body-file "$body" >/dev/null 2>&1 || log "Couldn't update the pull request's description." warning
+              fi
               if [ -z "$num" ]; then
-                if ! gh pr create --base "$TARGET" --head "$RH_BRANCH" --title "$1" --body "$body" >/dev/null 2>"$WORK/pr-err.txt"; then
+                if ! gh pr create --base "$TARGET" --head "$RH_BRANCH" --title "$1" --body-file "$body" >/dev/null 2>"$WORK/pr-err.txt"; then
                   FAILING=1
                   # "GitHub Actions is not permitted to create or approve pull requests": a setting a person changes, or ReleaseHub for them.
                   if grep -Eqi 'not permitted to create|resource not accessible|403' "$WORK/pr-err.txt"; then
@@ -2552,9 +2735,16 @@ jobs:
               export AZURE_DEVOPS_EXT_PAT="$SYSTEM_ACCESSTOKEN"
               num=$(az repos pr list --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$BUILD_REPOSITORY_NAME" \
                 --source-branch "$RH_BRANCH" --status active --query "[0].pullRequestId" -o tsv)
+              # Azure DevOps takes a description of up to 4000 characters.
+              local text
+              text=$(jq -Rrs '.[0:3900]' "$body")
+              if [ -n "$num" ] && [ -s "$PR_FILE" ]; then
+                az repos pr update --organization "$SYSTEM_COLLECTIONURI" --id "$num" --description "$text" >/dev/null 2>&1 \
+                  || log "Couldn't update the pull request's description." warning
+              fi
               if [ -z "$num" ]; then
                 num=$(az repos pr create --organization "$SYSTEM_COLLECTIONURI" --project "$SYSTEM_TEAMPROJECT" --repository "$BUILD_REPOSITORY_NAME" \
-                  --source-branch "$RH_BRANCH" --target-branch "$TARGET" --title "$1" --description "$body" --query pullRequestId -o tsv 2>"$WORK/pr-err.txt") \
+                  --source-branch "$RH_BRANCH" --target-branch "$TARGET" --title "$1" --description "$text" --query pullRequestId -o tsv 2>"$WORK/pr-err.txt") \
                   || { FAILING=1; fail "Opening the pull request failed: $(said "$WORK/pr-err.txt" | tail -c 300) $(permission_help)"; }
               fi
               url="${SYSTEM_COLLECTIONURI}${SYSTEM_TEAMPROJECT}/_git/${BUILD_REPOSITORY_NAME}/pullrequest/$num"
@@ -2567,7 +2757,21 @@ jobs:
               '{type: "code", pullRequest: {number: $n, url: $url, headSha: $sha}, changedFiles: $f, usage: $u, pullRequests: $x[0], waiting: $w, diff: $diff, needs: $needs[0]}')"
           }
 
-          # One stage: plan, answer, change (or revise) or revert, and report the result.
+          # What the play-test found (plan 1.48), as the agent wrote it: {summary, criteria: [{criterion, result, how, note, screenshots}]}, the
+          # screenshots named as they were sent. Without the file, why there are no results.
+          playtest_result() {
+            if [ -s "$PLAYTEST_FILE" ] && jq -e '(.criteria | type) == "array"' "$PLAYTEST_FILE" >/dev/null 2>&1; then
+              jq -c '{summary: (if (.summary | type) == "string" then .summary[0:4000] else null end),
+                criteria: [.criteria[0:30][] | select(type == "object") | {criterion: ((.criterion // "") | tostring), result: ((.result // "unchecked") | tostring),
+                  how: (if (.how | type) == "string" then .how else null end), note: (if (.note | type) == "string" then .note else null end),
+                  screenshots: [(.screenshots // [])[] | tostring | split("/") | last | gsub("[^A-Za-z0-9._-]"; "_") | .[0:120]]}]}' "$PLAYTEST_FILE"
+            else
+              jq -nc --rawfile r "$WORK/result.txt" '($r | sub("\\s+$"; "") | .[0:300]) as $said
+                | {problem: ("The agent finished without writing the play-test'"'"'s results" + (if ($said | length) > 0 then ": " + $said else "." end))}'
+            fi
+          }
+
+          # One stage: plan, answer, change (or revise), play-test or revert, and report the result.
           run_stage() {
             USAGE='null'
             echo '[]' > "$WORK/extra-prs.json"
@@ -2604,6 +2808,9 @@ jobs:
                   git checkout -q -b "$RH_BRANCH"
                 fi
                 log "Working on $RH_BRANCH."
+                case "$(git log -1 --format=%s 2>/dev/null)" in
+                  "WIP: "*) WIP=1; log "Going on from the work an earlier try left (its WIP commit)." ;;
+                esac
                 if [ "$(jq -r '(.prototype.files // []) | length' "$WORK/context.json")" -gt 0 ] && [ -z "$(git log --oneline "origin/$RH_BASE..HEAD" 2>/dev/null)" ]; then
                   # A prototype run starts from the approved prototype's files.
                   jq -c '.prototype.files[]' "$WORK/context.json" | while read -r file; do
@@ -2616,11 +2823,18 @@ jobs:
                   git commit -q -m "$KEY: start from the approved prototype" || true
                   log "Added the approved prototype's files."
                 fi
+                merge_base
                 prepare
                 run_agent "$WORK/prompt.md" edit
                 wrap_up
+                finish_merge
                 git add -A
-                if git diff --cached --quiet; then
+                if git diff --cached --quiet && git rev-parse -q --verify "origin/$RH_BRANCH" >/dev/null \
+                  && [ -n "$(git log --oneline "origin/$RH_BRANCH..HEAD" 2>/dev/null)" ]; then
+                  # Nothing else changed, but the merge that brought the base branch in is new: it goes up.
+                  push_branch
+                  log "Pushed $(git rev-parse --short HEAD) to $RH_BRANCH."
+                elif git diff --cached --quiet; then
                   local others
                   others=$(extras_changed)
                   if [ -z "$others" ]; then
@@ -2639,7 +2853,27 @@ jobs:
                   log "Pushed $(git rev-parse --short HEAD) to $RH_BRANCH."
                 fi
                 push_extras
+                publish_site
                 open_pr "$KEY: $TITLE"
+                ;;
+              playtest)
+                # The pull request as it is (plan 1.48): the agent tries each acceptance criterion in a browser and changes nothing.
+                git fetch -q origin "$RH_BRANCH" || fail "Couldn't fetch $RH_BRANCH to play-test it."
+                git checkout -q -B "$RH_BRANCH" "origin/$RH_BRANCH"
+                log "Play-testing $RH_BRANCH: each acceptance criterion in a browser, on a phone and a desktop."
+                rm -f "$PLAYTEST_FILE"
+                prepare
+                if [ -z "$BROWSER$PHONE$GAME" ]; then
+                  git reset --hard -q && git clean -fdq
+                  post "$(jq -nc --argjson w "$(keep_waiting)" '{type: "playtest", waiting: $w, playTest: {problem: "There is no browser for the agent here: a play-test needs Claude Code with its browser on, and an app with a package.json in the repository."}}')"
+                  return 0
+                fi
+                run_agent "$WORK/prompt.md" plan
+                wrap_up
+                playtest_result > "$WORK/playtest.out"
+                git reset --hard -q && git clean -fdq
+                post "$(jq -nc --slurpfile p "$WORK/playtest.out" --argjson u "$USAGE" --argjson w "$(keep_waiting)" --slurpfile n "$WORK/needs.out" \
+                  '{type: "playtest", playTest: $p[0], usage: $u, waiting: $w, needs: $n[0]}')"
                 ;;
               revert)
                 SHA=$(jq -r '.revert.commit // empty' "$WORK/context.json")
@@ -2667,7 +2901,7 @@ jobs:
             local minutes limit
             minutes=$(jq -r '.run.keepMinutes // 0' "$WORK/context.json")
             limit=$(jq -r '.run.jobMinutes // 40' "$WORK/context.json")
-            case "$RH_STAGE" in planning|coding|revision) ;; *) echo 0; return ;; esac
+            case "$RH_STAGE" in planning|coding|revision|playtest) ;; *) echo 0; return ;; esac
             # A hosted job has a time limit: one that has already run long takes no further stage.
             if [ "$((SECONDS - JOB_STARTED))" -ge "$((limit * 60))" ]; then echo 0; else echo "$minutes"; fi
           }
