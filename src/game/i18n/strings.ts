@@ -9,6 +9,8 @@ export const STRINGS = {
     playAgain: 'Play again',
     newBest: 'New best!',
     switchLanguage: 'العربية',
+    mute: 'Sound off',
+    unmute: 'Sound on',
   },
   ar: {
     title: 'صقر السماء',
@@ -19,6 +21,8 @@ export const STRINGS = {
     playAgain: 'العب مرة أخرى',
     newBest: 'رقم قياسي جديد!',
     switchLanguage: 'English',
+    mute: 'كتم الصوت',
+    unmute: 'تشغيل الصوت',
   },
 } as const;
 

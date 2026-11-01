@@ -7,6 +7,8 @@ import { createFalconView } from '../falcon/drawFalcon';
 import { getLangStore } from '../i18n/langStore';
 import { applyPageLang } from '../i18n/pageLang';
 import { type Lang, directionOf, formatNumber, otherLang, t } from '../i18n/strings';
+import { type MuteButton, createMuteButton } from '../audio/drawMuteButton';
+import { getSoundPlayer } from '../audio/soundPlayer';
 import { getBestScoreStore } from '../score/bestScore';
 
 const BUTTON = { x: GAME_WIDTH / 2, y: 610, width: 240, height: 84 };
@@ -30,6 +32,7 @@ export class StartScene extends Phaser.Scene {
   private best = 0;
   private texts: Phaser.GameObjects.GameObject[] = [];
   private switchHit!: Phaser.GameObjects.Zone;
+  private mute!: MuteButton;
 
   constructor() {
     super(StartScene.KEY);
@@ -57,14 +60,20 @@ export class StartScene extends Phaser.Scene {
     this.switchHit = this.add.zone(0, 0, SWITCH.width, SWITCH.height).setDepth(21).setInteractive({ useHandCursor: true });
     this.switchHit.on(Phaser.Input.Events.POINTER_DOWN, this.toggleLang, this);
     this.switchHit.setPosition(switchUi(this.lang).x, SWITCH.y);
+    const sound = getSoundPlayer();
+    this.mute = createMuteButton(this, this.lang, 'start', sound);
+    // The first gesture wakes the audio up (browsers allow sound only after one).
+    this.input.on(Phaser.Input.Events.POINTER_DOWN, () => sound.unlock());
     const keyboard = this.input.keyboard;
     if (keyboard) {
       keyboard.addCapture('SPACE,ENTER,L');
+      keyboard.on('keydown-M', this.onMuteKey, this);
       keyboard.on('keydown-L', this.onLangKey, this);
       keyboard.on('keydown-SPACE', this.onKey, this);
       keyboard.on('keydown-ENTER', this.onKey, this);
     }
     this.events.once(Phaser.Scenes.Events.SHUTDOWN, () => {
+      keyboard?.off('keydown-M', this.onMuteKey, this);
       keyboard?.off('keydown-L', this.onLangKey, this);
       keyboard?.off('keydown-SPACE', this.onKey, this);
       keyboard?.off('keydown-ENTER', this.onKey, this);
@@ -128,6 +137,7 @@ export class StartScene extends Phaser.Scene {
     shape.lineStyle(3, COLORS.buttonEdge, 1).strokeRoundedRect(sl, st, sw.width, sw.height, 18);
     text(sw.x, sw.y - 1, other, 28, UI.switchText, false);
     this.switchHit?.setPosition(sw.x, sw.y);
+    this.mute?.setLang(lang);
 
     this.registry.set('lang', lang);
     this.registry.set('dir', directionOf(lang));
@@ -146,7 +156,12 @@ export class StartScene extends Phaser.Scene {
     if (!event.repeat) this.toggleLang();
   }
 
+  private onMuteKey(event: KeyboardEvent): void {
+    if (!event.repeat) this.mute.toggle();
+  }
+
   private onKey(event: KeyboardEvent): void {
+    getSoundPlayer().unlock();
     if (!event.repeat) this.play();
   }
 

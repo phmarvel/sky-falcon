@@ -20,6 +20,8 @@ export function createGameConfig(parent: string | HTMLElement): Phaser.Types.Cor
     type: Phaser.AUTO,
     parent,
     backgroundColor: COLORS.skyMiddle,
+    // Our sounds are made by src/game/audio; Phaser's own audio manager is not needed and fails where audio is blocked.
+    audio: { noAudio: true },
     scale: {
       // FIT keeps the 9:16 proportions and shows the whole canvas; Phaser re-fits it when the window changes size.
       mode: Phaser.Scale.FIT,
